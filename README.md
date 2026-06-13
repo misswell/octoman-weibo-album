@@ -65,13 +65,11 @@ https://photo.weibo.com/{uid}/albums
 
 确认微博登录状态仍然有效，并检查扩展详情页是否已经授予微博和新浪图片域名权限。
 
-### 下载成 HTML 文件
+### 下载成 HTML 文件或文件名变成“下载.jpeg”
 
-通常是图片防盗链导致。当前版本会先以微博来源请求图片 Blob，再通过 Chrome 下载 API 保存。如果仍出现该问题，可以在扩展后台控制台查看 `[download:fetch:error]` 日志。
+通常是图片防盗链导致。当前版本通过 DNR 规则为 `sinaimg.cn` / `sinajs.cn` 自动设置 Referer 头，直接下载图片原 URL。如果仍出现该问题，可以在扩展后台控制台查看 `[download:error]` 日志。
 
-### 并发下载时文件名变成“下载.jpeg”
-
-扩展会在 Blob 下载阶段记录下载任务和原始文件名的对应关系，再通过 Chrome 下载命名回调恢复为微博原图文件名。若看到 `[download:filename:missing]` 日志，说明 Chrome 没有把该任务关联回扩展记录，可保留日志继续排查。
+> 如果同时安装了其他微博图片下载扩展（如 Octoman微博备份），它们可能通过 `onDeterminingFilename` 干扰文件名，导致变成“下载.jpeg”。关闭其他扩展即可。本扩展已不再使用 data URL 下载，避免了此类冲突。
 
 ### 文件夹名称不是目标用户
 
