@@ -1,68 +1,80 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>
-        Blacklist Checking
-    </title>
-    <meta http-equiv="content-type" content="txt/html; charset=utf-8"/>
+    <title>Octo Weibo Album</title>
+    <meta http-equiv="content-type" content="text/html; charset=utf-8"/>
     <link rel="stylesheet" type="text/css" href="popup.css"/>
     <script type="text/javascript" src="jquery/jquery-3.4.1.js"></script>
     <script type="text/javascript" src="popup.js"></script>
 </head>
 <body>
-<div id="login_suc" style="display: block;">
-    <ul class="process"><div style="position: relative;width:100%;">
-        <span>注意：务必关闭 "下载前询问每个文件的保存位置"</span>
-        <img src="/img/warning.png" class="warning-icon"></div>
-        <span class="warning-more">
-            <div>1、务必关闭 "下载前询问每个文件的保存位置，否则会出现非常多的对话框</div>
-            <div>2、需要登录微博，否则无法获取相册详情</div>
-            <div>3、下载数量不一致是因为用户删除了或设置了隐藏</div>
-        </span>
-    </ul>
-    <ul class="select-position" hidden><span class="user-list"></span>
+<main id="login_suc" class="popup-shell">
+    <header class="popup-header">
+        <div>
+            <h1>微博相册下载</h1>
+            <div class="name" hidden>正在识别当前页面</div>
+        </div>
+        <a href="#" id="author" class="feedback-link">反馈</a>
+    </header>
 
-        <select name="" id="ratio">
-            <option value="1">100%</option>
-            <option value="0.5">50%</option>
-            <option value="0.25">25%</option>
-            <option value="0.10">10%</option>
-            <option value="0.05">5%</option>
-            <option value="0.02">2%</option>
-            <option value="0.01">1%</option>
-        </select>
+    <section class="notice">
+        <button type="button" class="warning-toggle" aria-expanded="false">注意事项</button>
+        <div class="warning-more">
+            <p>关闭 Chrome 的“下载前询问每个文件的保存位置”。</p>
+            <p>保持微博登录状态，否则无法获取相册详情。</p>
+            <p>下载数量不一致通常是照片被删除或设置了隐藏。</p>
+        </div>
+    </section>
 
-        <span class="user-select"></span></ul>
-    <ul class="name" hidden>当前用户：</ul>
-    <ul class="album-loading">
+    <section class="toolbar select-position" hidden>
+        <label class="field">
+            <span>账号</span>
+            <span class="user-list"></span>
+        </label>
+        <label class="field compact">
+            <span>比例</span>
+            <select name="" id="ratio">
+                <option value="1">100%</option>
+                <option value="0.5">50%</option>
+                <option value="0.25">25%</option>
+                <option value="0.10">10%</option>
+                <option value="0.05">5%</option>
+                <option value="0.02">2%</option>
+                <option value="0.01">1%</option>
+            </select>
+        </label>
+        <label class="field compact">
+            <span>并发</span>
+            <select name="" id="con-current">
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+                <option value="5">5</option>
+                <option value="10">10</option>
+            </select>
+        </label>
+    </section>
+
+    <section class="album-loading">
         <img src="/img/loading.gif" alt="">
-    </ul>
-    <ul class="album-list">
+        <span>正在读取相册</span>
+    </section>
 
-    </ul>
-    <ul class="option-line">
-        <a href="#" id="author">问题反馈</a>
-        <span class="flex-center">
+    <section class="album-list"></section>
+
+    <section class="settings-row">
+        <label class="toggle">
             <input type="checkbox" id="open-folder" checked>
-            <span class="tit">完成打开文件夹</span>
-        </span>
-        <span class="flex-center">
-        <select name="" id="con-current">
-            <option value="1">1</option>
-            <option value="2">2</option>
-            <option value="3">3</option>
-            <option value="4">4</option>
-            <option value="5">5</option>
-            <option value="10">10</option>
-        </select>
-        <span class="tit">并发</span>
-        </span>
-    </ul>
-    <ul>
+            <span>完成后打开文件夹</span>
+        </label>
+        <div class="actions">
+            <input type="button" id="down-pause" value="暂停">
+            <input type="button" id="down-cancel" value="停止">
+        </div>
+    </section>
 
-        <input type="button" id="down-pause" value="暂停">
-        <input type="button" id="down-cancel" value="停止">
-    </ul>
-</div>
+    <section class="process"></section>
+</main>
 </body>
 </html>

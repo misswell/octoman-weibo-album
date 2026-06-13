@@ -7,8 +7,8 @@ document.addEventListener('DOMContentLoaded', function () {
         let open = $("#open-folder:checked").val();
         let down_allow = $("#con-current").val();
 
-        $(this).find('.selected').show();
-        $(this).find('.complete').show().text('等待下载');
+        $(this).addClass('is-downloading');
+        $(this).find('.complete').text('等待下载');
 
         let album_id = $(this).data('albid');
         let uid = $(this).data('uid');
@@ -86,6 +86,11 @@ document.addEventListener('DOMContentLoaded', function () {
     });
     $(".warning-icon").mouseleave(function(){
         $(".warning-more").slideUp();
+    });
+    $(".warning-toggle").click(function(){
+        let expanded = $(this).attr('aria-expanded') === 'true';
+        $(this).attr('aria-expanded', expanded ? 'false' : 'true').toggleClass('is-open', !expanded);
+        $(".warning-more").slideToggle(120);
     });
 
     events.window_get('down_pause',function(res){
@@ -180,27 +185,28 @@ chrome.runtime.onMessage.addListener(function (res, sender, sendResponse) {
                 album_id = list[i]['album_id'];
                 caption = list[i]['caption'];
                 type = list[i]['type'];
-                html += '<li class="item" ' +
+                html += '<div class="item" title="' + escape_html(caption) + '" ' +
                     'data-uid="' + uid + '" ' +
                     'data-albid="' + album_id + '" ' +
-                    'data-caption="' + caption + '"  ' +
-                    'data-name="' + name + '"  ' +
+                    'data-caption="' + escape_attr(caption) + '"  ' +
+                    'data-name="' + escape_attr(name) + '"  ' +
                     'data-type="' + type + '">';
-                html += '<img class="pic" src="' + cover + '" />';
-                html += '<span class="count">' + caption + count + '</span>';
+                html += '<img class="pic" src="' + escape_attr(cover) + '" />';
+                html += '<span class="count">' + escape_html(caption) + ' ' + count + '</span>';
                 html += '<span class="selected"></span>';
                 html += '<span class="complete" id="' + album_id + '"></span>';
-                html += '</li>'
+                html += '</div>'
             }
-            $('.name').html('<span class="to-album" data-alid="' + user_id + '">当前用户：' + name + ' UID：' + user_id + '</span>');
-            $('.album-list').html(html).show();
+            $('.name').html('<span class="to-album" data-alid="' + user_id + '">当前用户：' + escape_html(name) + ' UID：' + user_id + '</span>');
+            $('.album-list').html(html || '<div class="album-message">没有可下载的相册</div>').show();
             $('.album-loading').hide();
             suc_show();
         } catch (e) {
-            $('.name').html(e.toString()).show();
+            $('.album-list').html('<div class="album-message">' + escape_html(e.toString()) + '</div>').show();
+            $('.album-loading').hide();
         }
     } else if (res && res.type === 'album_fail') {
-        $('.album-list').html(res.data).show();
+        $('.album-list').html('<div class="album-message">' + escape_html(res.data) + '</div>').show();
         $('.album-loading').hide();
         err_hide();
     } else if (res && res.type === 'user_list') {
@@ -208,7 +214,7 @@ chrome.runtime.onMessage.addListener(function (res, sender, sendResponse) {
         let html = '';
         html += '<select class="album-select">';
         for (let i in list) {
-            html += '<option value="' + list[i]['uid'] + '">' + list[i]['name'] + '</option>';
+            html += '<option value="' + list[i]['uid'] + '">' + escape_html(list[i]['name']) + '</option>';
         }
         html += '</select>';
         $('.user-list').html(html)
@@ -224,13 +230,13 @@ chrome.runtime.onMessage.addListener(function (res, sender, sendResponse) {
         let album_detail = data.album_detail;
         $('#' + album_id).html(info?info:(suc + '/' + fail)).show();
         if ($('.process #process' + album_id).length == 0) {
-            $('.process').append('<li class="process-li" id="process' + album_id + '">');
+            $('.process').append('<div class="process-li" id="process' + album_id + '">');
         }
         let html = '';
         html += '<div class="album-info" ' +
             'data-uid="'+uid+'" data-alid="'+album_id+'"'+'" data-type="'+album_detail.type+'"' +
-            '><img class="process-pic" src="' + album_detail.cover_pic + '"/>';
-        html += '<span>' + album_detail.name + '_' + album_detail.caption + '</span></div>';
+            '><img class="process-pic" src="' + escape_attr(album_detail.cover_pic) + '"/>';
+        html += '<span>' + escape_html(album_detail.name + '_' + album_detail.caption) + '</span></div>';
         html += '<span>' + data.suc + ' / ' + album_detail.count + '</span>';
         $('.process #process' + album_id).html(html)
         // suc_show();
@@ -238,7 +244,7 @@ chrome.runtime.onMessage.addListener(function (res, sender, sendResponse) {
         let data = res.data;
         if (data.time_avg) {
             if ($('.process #time_avg').length == 0) {
-                $('.process').prepend('<li id="time_avg">');
+                $('.process').prepend('<div id="time_avg">');
             }
             $('.process #time_avg').html('每张平均下载耗时' + Math.round(data.time_avg /10)/1000+ 's，将以' + Math.round(data.time_avg)/1000 + 's 间隔翻页请求')
         }
@@ -256,4 +262,17 @@ function suc_show() {
     $('.select-position').show();
     $('.name').show();
 
+}
+
+function escape_html(str) {
+    return (str === undefined || str === null ? '' : str.toString())
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function escape_attr(str) {
+    return escape_html(str);
 }

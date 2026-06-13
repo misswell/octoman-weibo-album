@@ -14,24 +14,20 @@ function login_status() {
     $("#login_suc").hide();
     $("#login_fail").hide();
 
-    fetch('https://weibo.com/ajax/profile/info', {
-        method: 'GET',
-        credentials: 'include',
-        headers: {
-            'Accept': 'application/json, text/plain, */*'
-        }
-    }).then(function (res) {
-        if (res.ok) {
+    if (!chrome.cookies || !chrome.cookies.get) {
+        $("#login_suc").hide();
+        $("#login_fail").show();
+        $("#login_check").hide();
+        return;
+    }
+    chrome.cookies.get({url: WEIBO_HOME, name: 'SUB'}, function (cookie) {
+        if (cookie && cookie.value) {
             $("#login_suc").show();
             $("#login_fail").hide();
         } else {
             $("#login_suc").hide();
             $("#login_fail").show();
         }
-        $("#login_check").hide();
-    }).catch(function () {
-        $("#login_suc").hide();
-        $("#login_fail").show();
         $("#login_check").hide();
     });
 }
