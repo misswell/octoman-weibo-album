@@ -132,6 +132,9 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         window.page = 1;
         window.photo_list_temp = [];
         window['down_allow'] = down_allow;
+        window['down_stopped'] = false;
+        window['down_pause'] = false;
+        window['album_stopped_' + album_id] = false;
         set_download_status('running');
         let target_name = clean_user_name(name) || uid;
         if (!window['albumDetail' + album_id]) {
@@ -150,6 +153,7 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         }
         update_album_total(album_id, count);
         let folder = target_name + '_' + caption;
+        register_download_session(uid, album_id, type, folder);
         console.log('down_album target folder', {uid: uid, target_name: target_name, caption: caption, folder: folder});
         down_url(uid, album_id, type, folder);
         sendResponse(true)
@@ -173,16 +177,6 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
             sendResponse(true)
         });
 
-    } else if(request.type === 'down_pause'){
-        window['down_pause'] = !window['down_pause'];
-        console.log(window['down_pause']);
-        if (!window['down_pause']) {
-            set_download_status(has_active_downloads() ? 'running' : 'idle');
-            scheduleQueueDrain();
-        } else {
-            set_download_status('paused');
-        }
-        sendResponse(window['down_pause']);
     } else if(request.type === 'window_get'){
         let data = request.data;
         sendResponse(window[data]);
@@ -195,11 +189,68 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         sendResponse(data);
     } else if(request.type === 'down_cancel'){
         timeoutClear();
-        arrayQueue.reset();
         clearQueueSchedule();
+        window['down_stopped'] = true;
         window['down_pause'] = false;
         set_download_status('stopped');
+        sendResponse(get_download_state('stopped'));
+    } else if(request.type === 'down_resume'){
+        window['down_stopped'] = false;
+        window['down_pause'] = false;
+        let resumed = resume_download_sessions();
+        set_download_status(has_active_downloads() || resumed > 0 ? 'running' : 'idle', true);
+        scheduleQueueDrain();
+        sendResponse(get_download_state(window['download_status']));
+    } else if(request.type === 'album_stop'){
+        let album_id = request.album_id;
+        window['album_stopped_' + album_id] = true;
+        clear_album_queue_tasks(album_id);
+        sendResponse({album_id: album_id, stopped: true});
+    } else if(request.type === 'album_resume'){
+        let album_id = request.album_id;
+        window['album_stopped_' + album_id] = false;
+        let session = (window['downloadSessions'] || {})[album_id];
+        if (session && !window['download_finished' + album_id]) {
+            down_url(session.uid, session.album_id, session.type, session.folder);
+        }
+        sendResponse({album_id: album_id, suc: window['download_suc' + album_id] || 0, total: get_album_total(album_id)});
+    } else if(request.type === 'album_remove'){
+        let album_id = request.album_id;
+        clear_album_queue_tasks(album_id);
+        window['album_stopped_' + album_id] = true;
+        window['download_finished' + album_id] = true;
+        if (window['downloadSessions']) {
+            delete window['downloadSessions'][album_id];
+        }
+        delete window['download_suc' + album_id];
+        delete window['download_fail' + album_id];
+        delete window['albumDetail' + album_id];
+        delete window['uid' + album_id];
+        delete window['page' + album_id];
+        delete window['photo_list_temp' + album_id];
+        delete window['redo' + album_id];
+        delete window['timer' + album_id];
         sendResponse(true);
+    } else if(request.type === 'get_all_progress'){
+        let progress = [];
+        let sessions = window['downloadSessions'] || {};
+        for (let album_id in sessions) {
+            let detail = window['albumDetail' + album_id] || {};
+            progress.push({
+                album_id: album_id,
+                uid: window['uid' + album_id] || detail.uid || '',
+                caption: detail.caption || '',
+                name: detail.name || '',
+                cover_pic: detail.cover_pic || '',
+                type: detail.type || '',
+                suc: window['download_suc' + album_id] || 0,
+                fail: window['download_fail' + album_id] || 0,
+                total: get_album_total(album_id),
+                finished: !!window['download_finished' + album_id],
+                stopped: !!window['album_stopped_' + album_id]
+            });
+        }
+        sendResponse(progress);
     }
     return true;
 });
@@ -293,6 +344,11 @@ function album_get(info) {
 let base_folder = 'WeiboAlbum';
 
 function down_url(uid, album_id, type, folder) {
+    if (window['album_stopped_' + album_id] || window['down_stopped']) {
+        console.log('[download:page:skip:stopped]', {uid: uid, album_id: album_id, type: type, folder: folder});
+        return;
+    }
+    register_download_session(uid, album_id, type, folder);
     let url = 'https://photo.weibo.com/photos/get_all';
     let page;
     let photo_list_temp;
@@ -314,6 +370,10 @@ function down_url(uid, album_id, type, folder) {
     };
     console.log('down_url start',uid, album_id, type, folder);
     fetch_json(url, data, function (res) {
+        if (window['album_stopped_' + album_id] || window['down_stopped']) {
+            console.log('[download:page:ignored:stopped]', {uid: uid, album_id: album_id, page: page});
+            return;
+        }
         if (res.code === 0) {
             let photo_list = res.data['photo_list'] || [];
             let total = res.data['total'];
@@ -344,7 +404,9 @@ function down_url(uid, album_id, type, folder) {
                 window['page' + album_id] = page + 1;
                 window['redo' + album_id] = 0;
                 timeoutList(setTimeout(function () {
-                    down_url(uid, album_id, type, folder);
+                    if (!window['album_stopped_' + album_id] && !window['down_stopped']) {
+                        down_url(uid, album_id, type, folder);
+                    }
                 }, DELAY_PAGE * 1000));
             } else {
                 if (!redo(uid, album_id, type, folder, 1)) {
@@ -357,6 +419,10 @@ function down_url(uid, album_id, type, folder) {
         redo(uid, album_id, type, folder, 2)
     }
     }, function () {
+        if (window['album_stopped_' + album_id] || window['down_stopped']) {
+            console.log('[download:page:fail:stopped]', {uid: uid, album_id: album_id, page: page});
+            return;
+        }
         redo(uid, album_id, type, folder, 3);
     }, photo_detail_referrer(uid, album_id, type))
 }
@@ -446,7 +512,9 @@ function redo(uid, album_id, type, folder, code) {
     if (window['redo' + album_id] < code) {
         window['redo' + album_id] = window['redo' + album_id] + 1;
         timeoutList(setTimeout(function () {
-            down_url(uid, album_id, type, folder);
+            if (!window['album_stopped_' + album_id] && !window['down_stopped']) {
+                down_url(uid, album_id, type, folder);
+            }
         }, DELAY_PAGE * 1000));
         return true;
     } else {
@@ -482,6 +550,10 @@ function get_album_total(album_id) {
 }
 
 function reset_album_info(album_id){
+    window['download_finished' + album_id] = true;
+    if (window['downloadSessions']) {
+        delete window['downloadSessions'][album_id];
+    }
     events.album_complete({
         album_id: album_id,
         uid: window['uid' + album_id],
@@ -846,7 +918,9 @@ downCurrent = 0;
 albumList = [];
 down_allow = 1;
 down_pause = false;
+down_stopped = false;
 download_status = 'idle';
+downloadSessions = {};
 window['queueDrainTimer'] = null;
 config_get('down_allow', function (value) {
     down_allow = value !== null ? value : 1;
@@ -855,27 +929,58 @@ config_get('down_allow', function (value) {
 
 function enqueue_download_task(task) {
     arrayQueue.push(task);
-    if (task && task.type === 'down') {
+    if (task && task.type === 'down' && !window['down_stopped']) {
         set_download_status('running');
     }
     scheduleQueueDrain();
+}
+
+function clear_album_queue_tasks(album_id) {
+    let kept = [];
+    let list = arrayQueue.list();
+    for (let i in list) {
+        let task = list[i];
+        if (task.type === 'down' && task.data && task.data[2] == album_id) {
+            continue;
+        }
+        if (task.type === 'finish' && task.data == album_id) {
+            continue;
+        }
+        kept.push(task);
+    }
+    arrayQueue.reset();
+    for (let i in kept) {
+        arrayQueue.push(kept[i]);
+    }
 }
 
 function has_active_downloads() {
     return window['downCurrent'] > 0 || arrayQueue.length() > 0;
 }
 
-function set_download_status(status) {
-    if (window['download_status'] === status) {
-        return;
-    }
-    window['download_status'] = status;
-    events.download_status({
+function has_resumable_downloads() {
+    return arrayQueue.length() > 0 || Object.keys(window['downloadSessions'] || {}).length > 0 || window['downCurrent'] > 0;
+}
+
+function get_download_state(status) {
+    status = status || window['download_status'] || 'idle';
+    return {
         status: status,
         pending: arrayQueue.length(),
         downCurrent: window['downCurrent'] || 0,
-        paused: !!window['down_pause']
-    });
+        stopped: !!window['down_stopped'],
+        canResume: status === 'stopped' && has_resumable_downloads()
+    };
+}
+
+function set_download_status(status, force) {
+    window['download_state'] = get_download_state(status);
+    if (!force && window['download_status'] === status) {
+        return;
+    }
+    window['download_status'] = status;
+    window['download_state'] = get_download_state(status);
+    events.download_status(window['download_state']);
 }
 
 function clearQueueSchedule() {
@@ -886,7 +991,7 @@ function clearQueueSchedule() {
 }
 
 function scheduleQueueDrain() {
-    if (window['queueDrainTimer'] || window['down_pause']) {
+    if (window['queueDrainTimer'] || window['down_stopped']) {
         return;
     }
     window['queueDrainTimer'] = setTimeout(function () {
@@ -896,7 +1001,7 @@ function scheduleQueueDrain() {
 }
 
 function drainQueue() {
-    if (window['down_pause']) {
+    if (window['down_stopped']) {
         return;
     }
     let started = 0;
@@ -927,4 +1032,51 @@ function drainQueue() {
     if (arrayQueue.length() > 0 && window['downCurrent'] < window['down_allow']) {
         scheduleQueueDrain();
     }
+}
+
+function register_download_session(uid, album_id, type, folder) {
+    if (!window['downloadSessions']) {
+        window['downloadSessions'] = {};
+    }
+    window['download_finished' + album_id] = false;
+    window['downloadSessions'][album_id] = {
+        uid: uid,
+        album_id: album_id,
+        type: type,
+        folder: folder
+    };
+}
+
+function resume_download_sessions() {
+    let sessions = window['downloadSessions'] || {};
+    let resumed = 0;
+    for (let album_id in sessions) {
+        if (window['download_finished' + album_id]) {
+            continue;
+        }
+        let session = sessions[album_id];
+        if (!session) {
+            continue;
+        }
+        resumed++;
+        if (!queue_has_task(session.album_id, 'finish')) {
+            down_url(session.uid, session.album_id, session.type, session.folder);
+        }
+    }
+    console.log('[download:resume]', {
+        resumed: resumed,
+        pending: arrayQueue.length(),
+        downCurrent: window['downCurrent']
+    });
+    return resumed;
+}
+
+function queue_has_task(album_id, type) {
+    let list = arrayQueue.list();
+    for (let i in list) {
+        if (list[i] && list[i].type === type && list[i].data == album_id) {
+            return true;
+        }
+    }
+    return false;
 }

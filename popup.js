@@ -71,25 +71,36 @@ document.addEventListener('DOMContentLoaded', function () {
         events.config_set({'down_allow':down_allow});
         events.window_set({'down_allow':down_allow});
     });
-    $("#down-pause").click(function(){
-        events.down_pause(function(res){
-            if(res===true){//暂停中
-                $("#down-pause").val('继续');
-            }else{
-                $("#down-pause").val('暂停');
-            }
-        })
-    });
-    $("#down-cancel").click(function(){
-        if ($(this).prop('disabled')) {
-            return;
+    $('body').on('click', '.process-li-stop', function () {
+        let $li = $(this).closest('.process-li');
+        let album_id = $li.data('albid');
+        let action = $(this).data('action');
+        if (action === 'resume') {
+            events.album_resume(album_id, function(res){
+                $li.find('.process-li-stop').val('停止').data('action', 'stop').removeClass('is-resume');
+                $li.find('.process-li-progress').text(res ? (res.suc||0) + ' / ' + (res.total||0) : '');
+            });
+        } else {
+            events.album_stop(album_id, function(res){
+                $li.find('.process-li-stop').val('继续').data('action', 'resume').addClass('is-resume');
+            });
         }
-        events.send_message('down_cancel',function(res){
-            if (res === true) {
-                $("#down-pause").val('暂停');
-                set_download_status('stopped');
-            }
-        })
+    });
+    $('body').on('click', '.process-li-delete', function () {
+        let $li = $(this).closest('.process-li');
+        let album_id = $li.data('albid');
+        if (confirm('确定删除"' + ($li.find('.album-info span').text() || album_id) + '"的下载记录？')) {
+            events.album_remove(album_id, function(){
+                $li.remove();
+                if ($('.process-body').children().length === 0) {
+                    $('.process').hide();
+                }
+            });
+        }
+    });
+    $("#process-close").click(function(){
+        $('.process').hide();
+        events.window_set({'process_hidden': true});
     });
     $(".warning-icon").mouseover(function(){
         $(".warning-more").slideDown();
@@ -103,24 +114,51 @@ document.addEventListener('DOMContentLoaded', function () {
         $(".warning-more").slideToggle(120);
     });
 
-    events.window_get('down_pause',function(res){
-        if(res===true){//暂停中
-            $("#down-pause").val('继续')
-            set_download_status('paused');
-        }else{
-            $("#down-pause").val('暂停')
-        }
-    });
     events.config_get('open_folder',function(res){
         $("#open-folder").prop('checked',res==1?true:false)
     });
     events.config_get('down_allow',function(res){
         $("#con-current").val(res)
     });
-    events.window_get('download_status',function(res){
+    events.window_get('download_state',function(res){
         set_download_status(res || 'idle');
     });
+    events.window_get('process_hidden',function(res){
+        if (res) {
+            $('.process').hide();
+        }
+    });
+    // restore progress on popup open
+    events.get_all_progress(function(progress){
+        if (!progress || progress.length === 0) return;
+        $('.process-body').empty();
+        for (let i in progress) {
+            let p = progress[i];
+            let html = render_process_li(p.album_id, p.uid, p, p.suc||0, p.total||0, p.finished, p.stopped);
+            $('.process-body').append(html);
+        }
+    });
 });
+
+function render_process_li(album_id, uid, detail, suc, total, finished, stopped) {
+    let html = '';
+    html += '<div class="process-li" id="process' + album_id + '" data-albid="' + album_id + '" data-uid="' + uid + '">';
+    html += '<div class="album-info" data-uid="'+uid+'" data-alid="'+album_id+'" data-type="'+(detail.type||'')+'">';
+    html += '<img class="process-pic" src="' + escape_attr(detail.cover_pic||'') + '"/>';
+    html += '<span>' + escape_html([detail.name, detail.caption].filter(Boolean).join('_')) + '</span></div>';
+    html += '<span class="process-li-progress">' + suc + ' / ' + total + '</span>';
+    html += '<div class="process-li-actions">';
+    if (finished) {
+        html += '<input type="button" class="process-li-stop" value="完成" disabled>';
+    } else if (stopped) {
+        html += '<input type="button" class="process-li-stop is-resume" value="继续" data-action="resume">';
+    } else {
+        html += '<input type="button" class="process-li-stop" value="停止" data-action="stop">';
+    }
+    html += '<input type="button" class="process-li-delete" value="删除">';
+    html += '</div></div>';
+    return html;
+}
 
 var events = {
         current_page: () => {
@@ -168,8 +206,28 @@ var events = {
                 typeof callback === 'function' && callback(res)
             })
         },
-        down_pause:(callback)=>{
-            chrome.runtime.sendMessage({type: 'down_pause'}, function (res) {
+        down_resume:(callback)=>{
+            chrome.runtime.sendMessage({type: 'down_resume'}, function (res) {
+                typeof callback === 'function' && callback(res)
+            })
+        },
+        get_all_progress:(callback)=>{
+            chrome.runtime.sendMessage({type: 'get_all_progress'}, function (res) {
+                typeof callback === 'function' && callback(res)
+            })
+        },
+        album_stop:(album_id,callback)=>{
+            chrome.runtime.sendMessage({type: 'album_stop', album_id: album_id}, function (res) {
+                typeof callback === 'function' && callback(res)
+            })
+        },
+        album_resume:(album_id,callback)=>{
+            chrome.runtime.sendMessage({type: 'album_resume', album_id: album_id}, function (res) {
+                typeof callback === 'function' && callback(res)
+            })
+        },
+        album_remove:(album_id,callback)=>{
+            chrome.runtime.sendMessage({type: 'album_remove', album_id: album_id}, function (res) {
                 typeof callback === 'function' && callback(res)
             })
         }
@@ -247,31 +305,32 @@ chrome.runtime.onMessage.addListener(function (res, sender, sendResponse) {
         let total = parseInt(data.total || album_detail.count, 10) || 0;
         let handled = suc + fail;
         let progress_total = total > 0 ? total : handled;
+        let finished = info === '下载完成';
         $('#' + album_id).html(info ? info : (suc + ' / ' + progress_total)).show();
-        if (info === '下载完成') {
+        if (finished) {
             set_download_status('complete');
         }
-        if ($('.process #process' + album_id).length == 0) {
-            $('.process').append('<div class="process-li" id="process' + album_id + '">');
+        let $li = $('.process-body #process' + album_id);
+        if ($li.length === 0) {
+            $('.process-body').append(render_process_li(album_id, uid, album_detail, suc, progress_total, finished));
+        } else {
+            $li.find('.process-li-progress').text(suc + ' / ' + progress_total);
+            if (finished) {
+                $li.find('.process-li-stop').prop('disabled', true).val('完成').removeClass('is-resume');
+            }
         }
-        let html = '';
-        html += '<div class="album-info" ' +
-            'data-uid="'+uid+'" data-alid="'+album_id+'"'+'" data-type="'+(album_detail.type || '')+'"' +
-            '><img class="process-pic" src="' + escape_attr(album_detail.cover_pic || '') + '"/>';
-        html += '<span>' + escape_html([album_detail.name, album_detail.caption].filter(Boolean).join('_')) + '</span></div>';
-        html += '<span>' + suc + ' / ' + progress_total + '</span>';
-        $('.process #process' + album_id).html(html)
+        $('.process').show();
         // suc_show();
     } else if (res.type === 'pop_info') {
         let data = res.data;
         if (data.time_avg) {
-            if ($('.process #time_avg').length == 0) {
-                $('.process').prepend('<div id="time_avg">');
+            if ($('.process-body #time_avg').length == 0) {
+                $('.process-body').prepend('<div id="time_avg">');
             }
-            $('.process #time_avg').html('每张平均下载耗时' + Math.round(data.time_avg /10)/1000+ 's，将以' + Math.round(data.time_avg)/1000 + 's 间隔翻页请求')
+            $('.process-body #time_avg').html('每张平均下载耗时' + Math.round(data.time_avg /10)/1000+ 's，将以' + Math.round(data.time_avg)/1000 + 's 间隔翻页请求')
         }
     } else if (res && res.type === 'download_status') {
-        set_download_status(res.data && res.data.status ? res.data.status : 'idle');
+        set_download_status(res.data || 'idle');
     }
     sendResponse('done');
     return true
@@ -288,19 +347,8 @@ function suc_show() {
 
 }
 
-function set_download_status(status) {
-    let running = status === 'running';
-    let status_text = {
-        idle: '暂无下载任务',
-        running: '正在下载，可停止',
-        paused: '已暂停，继续后可停止',
-        stopped: '已停止',
-        complete: '下载完成'
-    };
-    $('#down-cancel')
-        .prop('disabled', !running)
-        .toggleClass('is-disabled', !running)
-        .attr('title', status_text[status] || status_text.idle);
+function set_download_status(state) {
+    // no-op: per-album controls only
 }
 
 function escape_html(str) {
