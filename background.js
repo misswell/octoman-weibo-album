@@ -599,9 +599,54 @@ function normalize_download_filename(path) {
     return normalized.join('/');
 }
 
+function basename_from_url(url) {
+    if (!url || typeof url !== 'string' || url.indexOf('data:') === 0) {
+        return '';
+    }
+    try {
+        let pathname = (new URL(url)).pathname || '';
+        let parts = pathname.split('/');
+        return decodeURIComponent(parts[parts.length - 1] || '');
+    } catch (e) {
+        try {
+            let clean_url = url.split('#')[0].split('?')[0];
+            let parts = clean_url.split('/');
+            return decodeURIComponent(parts[parts.length - 1] || '');
+        } catch (ignore) {
+            return '';
+        }
+    }
+}
+
+function fallback_download_filename(url, album_id) {
+    let filename = reg_filename(basename_from_url(url));
+    if (!filename) {
+        filename = 'download_' + (new Date()).getTime() + (is_weibo_image_url(url) ? '.jpg' : '');
+    } else if (is_weibo_image_url(url) && !ext(filename)) {
+        filename += '.jpg';
+    }
+    let album_folder = reg_filename((album_id || 'unknown').toString()) || 'unknown';
+    return normalize_download_filename(base_folder + '/' + album_folder + '/' + filename);
+}
+
+function build_download_filename(url, name, album_id) {
+    let filename = normalize_download_filename(name);
+    if (filename) {
+        return filename;
+    }
+    filename = fallback_download_filename(url, album_id);
+    console.warn('[download:filename:fallback]', {
+        album_id: album_id,
+        url: url,
+        originalFilename: name,
+        fallbackFilename: filename
+    });
+    return filename;
+}
+
 function down(url, name, album_id, callback) {
     // console.log(url, name);
-    name = normalize_download_filename(name);
+    name = build_download_filename(url, name, album_id);
     let startStamp = (new Date()).getTime();
     if(!window['downCurrent']){
         window['downCurrent'] = 0;
@@ -661,8 +706,7 @@ function download_weibo_image(url, name, album_id, startStamp, callback) {
         download_direct({
             url: append_data_url_token(data_url, filename_token),
             filename: name,
-            conflictAction: 'overwrite',
-            filenameToken: filename_token
+            conflictAction: 'overwrite'
         }, url, name, album_id, startStamp, callback);
     }).catch(function (e) {
         window['downCurrent'] =  window['downCurrent'] - 1;
@@ -702,10 +746,14 @@ function blob_to_data_url(blob) {
 }
 
 let pendingDataUrlFilenames = {};
-let pendingDataUrlFilenameIds = {};
+let dataUrlFilenameMarker = '#octo_weibo_album_filename=';
 
 function queue_data_url_filename(filename) {
-    let token = 'octoman_' + (new Date()).getTime() + '_' + Math.random().toString(36).slice(2);
+    filename = normalize_download_filename(filename);
+    if (!filename) {
+        return '';
+    }
+    let token = 'octo_weibo_album_' + (new Date()).getTime() + '_' + Math.random().toString(36).slice(2);
     pendingDataUrlFilenames[token] = {
         filename: filename,
         time: (new Date()).getTime()
@@ -714,31 +762,30 @@ function queue_data_url_filename(filename) {
     return token;
 }
 
-function remember_data_url_filename_by_id(download_id, token) {
-    if (pendingDataUrlFilenames[token]) {
-        pendingDataUrlFilenameIds[download_id] = token;
-    }
-}
-
 function append_data_url_token(data_url, token) {
-    return data_url + '#octoman_filename=' + encodeURIComponent(token);
+    if (!token) {
+        return data_url;
+    }
+    return data_url + dataUrlFilenameMarker + encodeURIComponent(token);
 }
 
 function data_url_filename_token(url) {
-    let marker = '#octoman_filename=';
-    let index = (url || '').lastIndexOf(marker);
+    let index = (url || '').lastIndexOf(dataUrlFilenameMarker);
     if (index < 0) {
         return '';
     }
-    return decodeURIComponent(url.substring(index + marker.length));
+    try {
+        return decodeURIComponent(url.substring(index + dataUrlFilenameMarker.length));
+    } catch (e) {
+        return '';
+    }
 }
 
 function take_data_url_filename(item) {
-    let token = data_url_filename_token(item.url) || pendingDataUrlFilenameIds[item.id];
+    let token = data_url_filename_token(item && item.url);
     let pending = token ? pendingDataUrlFilenames[token] : null;
-    if (token) {
+    if (pending) {
         delete pendingDataUrlFilenames[token];
-        delete pendingDataUrlFilenameIds[item.id];
     }
     return pending;
 }
@@ -752,44 +799,34 @@ function prune_data_url_filenames() {
             delete pendingDataUrlFilenames[token];
         }
     }
-    let ids = Object.keys(pendingDataUrlFilenameIds);
-    for (let i in ids) {
-        let download_id = ids[i];
-        if (!pendingDataUrlFilenames[pendingDataUrlFilenameIds[download_id]]) {
-            delete pendingDataUrlFilenameIds[download_id];
-        }
-    }
 }
 
 chrome.downloads.onDeterminingFilename.addListener(function (item, suggest) {
-    if (item && item.url && item.url.indexOf('data:') === 0) {
-        let pending = take_data_url_filename(item);
-        if (pending && pending.filename) {
-            console.log('[download:filename:suggest]', {
-                downloadId: item.id,
-                originalFilename: item.filename,
-                suggestedFilename: pending.filename
-            });
-            suggest({filename: pending.filename, conflictAction: 'overwrite'});
-            return true;
-        }
+    if (!item || !item.url || item.url.indexOf('data:image/') !== 0 || !data_url_filename_token(item.url)) {
+        return;
+    }
+    let pending = take_data_url_filename(item);
+    let filename = pending && pending.filename ? normalize_download_filename(pending.filename) : '';
+    if (!filename) {
         console.warn('[download:filename:missing]', {
             downloadId: item.id,
             originalFilename: item.filename,
             hasToken: !!data_url_filename_token(item.url),
-            hasIdMapping: !!pendingDataUrlFilenameIds[item.id],
             pendingCount: Object.keys(pendingDataUrlFilenames).length
         });
+        return;
     }
+    console.log('[download:filename:suggest]', {
+        downloadId: item.id,
+        originalFilename: item.filename,
+        suggestedFilename: filename
+    });
+    suggest({filename: filename, conflictAction: 'overwrite'});
+    return true;
 });
 
 function download_direct(download_options, url, name, album_id, startStamp, callback) {
-    let filename_token = download_options.filenameToken || '';
-    delete download_options.filenameToken;
     chrome.downloads.download(download_options, function (res) {
-        if (res && filename_token) {
-            remember_data_url_filename_by_id(res, filename_token);
-        }
         window['downCurrent'] =  window['downCurrent'] - 1;
         // if (!window['downTime' + album_id]) {
         //     window['downTime' + album_id] = []
@@ -865,10 +902,17 @@ chrome.downloads.onChanged.addListener(function (delta) {
         });
     }
     if (delta.filename) {
+        let filename = delta.filename.current || delta.filename.previous;
         console.log('[download:onChanged:filename]', {
             downloadId: delta.id,
-            filename: delta.filename.current || delta.filename.previous
+            filename: filename
         });
+        if (/\.html?$/i.test(filename || '')) {
+            console.warn('[download:onChanged:html_filename]', {
+                downloadId: delta.id,
+                filename: filename
+            });
+        }
     }
 });
 

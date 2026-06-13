@@ -69,7 +69,7 @@ https://photo.weibo.com/{uid}/albums
 
 通常是图片防盗链导致。当前版本通过 DNR 规则为 `sinaimg.cn` / `sinajs.cn` 自动设置 Referer 头，直接下载图片原 URL。如果仍出现该问题，可以在扩展后台控制台查看 `[download:error]` 日志。
 
-> 如果同时安装了其他微博图片下载扩展（如 Octoman微博备份），它们可能通过 `onDeterminingFilename` 干扰文件名，导致变成“下载.jpeg”。关闭其他扩展即可。本扩展已不再使用 data URL 下载，避免了此类冲突。
+> 0.3.4 起，本扩展只为自己生成的 `data:image/*` 下载注册带专属标记的 `onDeterminingFilename`，不处理其他扩展的 `data:text/html` 下载。微博图片会先由扩展后台带微博 referrer 拉取并校验必须是 `image/*`，再保存为图片，既避免把风控/403 返回的 HTML 下载成 `.html`，也避免文件名退化成“下载.jpeg”。
 
 ### 文件夹名称不是目标用户
 
