@@ -15,6 +15,7 @@ document.addEventListener('DOMContentLoaded', function () {
         let caption = $(this).data('caption');
         let type = $(this).data('type');
         let name = $(this).data('name');
+        let count = $(this).data('count');
 
         let data = {
             album_id: album_id,
@@ -22,6 +23,7 @@ document.addEventListener('DOMContentLoaded', function () {
             caption: caption,
             type: type,
             name: name,
+            count: count,
             ratio:ratio,
             open:open,
             down_allow:down_allow,
@@ -190,9 +192,11 @@ chrome.runtime.onMessage.addListener(function (res, sender, sendResponse) {
                     'data-albid="' + album_id + '" ' +
                     'data-caption="' + escape_attr(caption) + '"  ' +
                     'data-name="' + escape_attr(name) + '"  ' +
+                    'data-count="' + count + '"  ' +
                     'data-type="' + type + '">';
                 html += '<img class="pic" src="' + escape_attr(cover) + '" />';
-                html += '<span class="count">' + escape_html(caption) + ' ' + count + '</span>';
+                html += '<span class="caption">' + escape_html(caption) + '</span>';
+                html += '<span class="count">' + count + '</span>';
                 html += '<span class="selected"></span>';
                 html += '<span class="complete" id="' + album_id + '"></span>';
                 html += '</div>'
@@ -224,20 +228,23 @@ chrome.runtime.onMessage.addListener(function (res, sender, sendResponse) {
         let data = res.data;
         let album_id = data.album_id;
         let uid = data.uid;
-        let suc = data.suc;
-        let fail = data.fail;
+        let suc = parseInt(data.suc, 10) || 0;
+        let fail = parseInt(data.fail, 10) || 0;
         let info = data.info;
-        let album_detail = data.album_detail;
-        $('#' + album_id).html(info?info:(suc + '/' + fail)).show();
+        let album_detail = data.album_detail || {};
+        let total = parseInt(data.total || album_detail.count, 10) || 0;
+        let handled = suc + fail;
+        let progress_total = total > 0 ? total : handled;
+        $('#' + album_id).html(info ? info : (suc + ' / ' + progress_total)).show();
         if ($('.process #process' + album_id).length == 0) {
             $('.process').append('<div class="process-li" id="process' + album_id + '">');
         }
         let html = '';
         html += '<div class="album-info" ' +
-            'data-uid="'+uid+'" data-alid="'+album_id+'"'+'" data-type="'+album_detail.type+'"' +
-            '><img class="process-pic" src="' + escape_attr(album_detail.cover_pic) + '"/>';
-        html += '<span>' + escape_html(album_detail.name + '_' + album_detail.caption) + '</span></div>';
-        html += '<span>' + data.suc + ' / ' + album_detail.count + '</span>';
+            'data-uid="'+uid+'" data-alid="'+album_id+'"'+'" data-type="'+(album_detail.type || '')+'"' +
+            '><img class="process-pic" src="' + escape_attr(album_detail.cover_pic || '') + '"/>';
+        html += '<span>' + escape_html([album_detail.name, album_detail.caption].filter(Boolean).join('_')) + '</span></div>';
+        html += '<span>' + suc + ' / ' + progress_total + '</span>';
         $('.process #process' + album_id).html(html)
         // suc_show();
     } else if (res.type === 'pop_info') {

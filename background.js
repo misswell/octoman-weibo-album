@@ -116,6 +116,7 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         let caption = data.caption;
         let type = data.type;
         let name = data.name;
+        let count = data.count;
         let ratio = data.ratio;
         let open = data.open;
         let down_allow = data.down_allow;
@@ -129,9 +130,21 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         window.photo_list_temp = [];
         window['down_allow'] = down_allow;
         let target_name = clean_user_name(name) || uid;
-        if (window['albumDetail' + album_id]) {
+        if (!window['albumDetail' + album_id]) {
+            window['albumDetail' + album_id] = {
+                album_id: album_id,
+                caption: caption,
+                cover_pic: '',
+                type: type,
+                count: parseInt(count, 10) || 0,
+                name: target_name
+            };
+        } else {
             window['albumDetail' + album_id].name = target_name;
+            window['albumDetail' + album_id].caption = window['albumDetail' + album_id].caption || caption;
+            window['albumDetail' + album_id].type = window['albumDetail' + album_id].type || type;
         }
+        update_album_total(album_id, count);
         let folder = target_name + '_' + caption;
         console.log('down_album target folder', {uid: uid, target_name: target_name, caption: caption, folder: folder});
         down_url(uid, album_id, type, folder);
@@ -321,6 +334,7 @@ function down_url(uid, album_id, type, folder) {
         if (res.code === 0) {
             let photo_list = res.data['photo_list'];
             let total = res.data['total'];
+            update_album_total(album_id, total);
             let info_list = [];
             let queue;
             console.log('photo_list page', page, photo_list);
@@ -426,6 +440,7 @@ function down_modern_album_page(uid, album_id, folder, sinceid, fetch_page, fail
             return;
         }
         let photo_list = res.photo_list || [];
+        update_album_total(album_id, res.total || photo_list.length);
         let info_list = [];
         let queue;
         for (let i in photo_list) {
@@ -734,12 +749,39 @@ function redo(uid, album_id, type, folder, code) {
     }
 }
 
+function update_album_total(album_id, total) {
+    total = parseInt(total, 10);
+    if (!total || total < 0) {
+        return;
+    }
+    let current = window['albumDetail' + album_id] ? parseInt(window['albumDetail' + album_id].count, 10) : 0;
+    if (current && current > total) {
+        return;
+    }
+    if (!window['albumDetail' + album_id]) {
+        window['albumDetail' + album_id] = {album_id: album_id, count: total};
+    } else {
+        window['albumDetail' + album_id].count = total;
+    }
+}
+
+function get_album_total(album_id) {
+    let detail = window['albumDetail' + album_id] || {};
+    let total = parseInt(detail.count, 10);
+    if (total && total > 0) {
+        return total;
+    }
+    let downloaded = (window['download_suc' + album_id] || 0) + (window['download_fail' + album_id] || 0);
+    return downloaded > 0 ? downloaded : 0;
+}
+
 function reset_album_info(album_id){
     events.album_complete({
         album_id: album_id,
         uid: window['uid' + album_id],
         suc: window['download_suc' + album_id]?window['download_suc' + album_id]:0,
         fail: window['download_fail' + album_id]?window['download_fail' + album_id]:0,
+        total: get_album_total(album_id),
         info:'下载完成',
         album_detail: window['albumDetail' + album_id]
     });
@@ -879,6 +921,7 @@ function download_direct(download_options, url, name, album_id, startStamp, call
                 uid: window['uid' + album_id],
                 suc: window['download_suc' + album_id],
                 fail: window['download_fail' + album_id],
+                total: get_album_total(album_id),
                 album_detail: window['albumDetail' + album_id]
             });
         }
@@ -931,6 +974,7 @@ function download_weibo_image(url, name, album_id, startStamp, callback) {
                 uid: window['uid' + album_id],
                 suc: window['download_suc' + album_id],
                 fail: window['download_fail' + album_id],
+                total: get_album_total(album_id),
                 album_detail: window['albumDetail' + album_id]
             });
         }
