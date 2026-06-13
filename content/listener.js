@@ -101,7 +101,7 @@ function wb_info_new(cb){
         all.each(function(){
             name_temp = $(this).find("header .woo-box-item-flex a span").attr('title');
             uid_temp = $(this).find("header .woo-box-item-flex a").attr('href');
-            uid_temp = uid_temp ? uid_temp.replace("\/u\/","").replace(/^https?:\/\/weibo.com\/u\//, "") : '';
+            uid_temp = uid_temp ? (uid_temp.match(/\/u\/(\d+)/) || ['', ''])[1] : '';
             var exist = list.findIndex(function(item){
                 return item['uid'] === uid_temp;
             });

@@ -337,33 +337,6 @@ input[type="button"].is-disabled {
     font-weight: 600;
 }
 
-.process-actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-.process-close {
-    width: 22px;
-    height: 22px;
-    padding: 0;
-    border: 1px solid #bcccdc;
-    border-radius: 4px;
-    color: #829ab1;
-    background: #fff;
-    cursor: pointer;
-    font-size: 12px;
-    line-height: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.process-close:hover {
-    color: #334e68;
-    border-color: #829ab1;
-}
-
 .process-body {
     display: flex;
     flex-direction: column;

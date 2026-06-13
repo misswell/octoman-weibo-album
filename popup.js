@@ -98,10 +98,6 @@ document.addEventListener('DOMContentLoaded', function () {
             });
         }
     });
-    $("#process-close").click(function(){
-        $('.process').hide();
-        events.window_set({'process_hidden': true});
-    });
     $(".warning-icon").mouseover(function(){
         $(".warning-more").slideDown();
     });
@@ -122,11 +118,6 @@ document.addEventListener('DOMContentLoaded', function () {
     });
     events.window_get('download_state',function(res){
         set_download_status(res || 'idle');
-    });
-    events.window_get('process_hidden',function(res){
-        if (res) {
-            $('.process').hide();
-        }
     });
     // restore progress on popup open
     events.get_all_progress(function(progress){
