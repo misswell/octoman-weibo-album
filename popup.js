@@ -1,5 +1,6 @@
 document.addEventListener('DOMContentLoaded', function () {
     events.current_page();
+    set_download_status('idle');
 
     $('body').on('click', '.item', function (elm) {
 
@@ -9,6 +10,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
         $(this).addClass('is-downloading');
         $(this).find('.complete').text('等待下载');
+        set_download_status('running');
 
         let album_id = $(this).data('albid');
         let uid = $(this).data('uid');
@@ -41,9 +43,8 @@ document.addEventListener('DOMContentLoaded', function () {
     });
 
     $('body').on('click', '.to-album', function () {
-        let album_id = $(this).data('alid');
-        window.open('https://photo.weibo.com/' + album_id);
-
+        let uid = $(this).data('uid') || $(this).data('alid');
+        window.open('https://photo.weibo.com/' + uid + '/albums');
     });
     $('body').on('click', '.album-info', function () {
         let album_id = $(this).data('alid');
@@ -80,7 +81,14 @@ document.addEventListener('DOMContentLoaded', function () {
         })
     });
     $("#down-cancel").click(function(){
+        if ($(this).prop('disabled')) {
+            return;
+        }
         events.send_message('down_cancel',function(res){
+            if (res === true) {
+                $("#down-pause").val('暂停');
+                set_download_status('stopped');
+            }
         })
     });
     $(".warning-icon").mouseover(function(){
@@ -98,6 +106,7 @@ document.addEventListener('DOMContentLoaded', function () {
     events.window_get('down_pause',function(res){
         if(res===true){//暂停中
             $("#down-pause").val('继续')
+            set_download_status('paused');
         }else{
             $("#down-pause").val('暂停')
         }
@@ -107,6 +116,9 @@ document.addEventListener('DOMContentLoaded', function () {
     });
     events.config_get('down_allow',function(res){
         $("#con-current").val(res)
+    });
+    events.window_get('download_status',function(res){
+        set_download_status(res || 'idle');
     });
 });
 
@@ -201,7 +213,7 @@ chrome.runtime.onMessage.addListener(function (res, sender, sendResponse) {
                 html += '<span class="complete" id="' + album_id + '"></span>';
                 html += '</div>'
             }
-            $('.name').html('<span class="to-album" data-alid="' + user_id + '">当前用户：' + escape_html(name) + ' UID：' + user_id + '</span>');
+            $('.name').html('<span class="to-album" data-uid="' + user_id + '">当前用户：' + escape_html(name) + ' UID：' + user_id + '</span>');
             $('.album-list').html(html || '<div class="album-message">没有可下载的相册</div>').show();
             $('.album-loading').hide();
             suc_show();
@@ -236,6 +248,9 @@ chrome.runtime.onMessage.addListener(function (res, sender, sendResponse) {
         let handled = suc + fail;
         let progress_total = total > 0 ? total : handled;
         $('#' + album_id).html(info ? info : (suc + ' / ' + progress_total)).show();
+        if (info === '下载完成') {
+            set_download_status('complete');
+        }
         if ($('.process #process' + album_id).length == 0) {
             $('.process').append('<div class="process-li" id="process' + album_id + '">');
         }
@@ -255,6 +270,8 @@ chrome.runtime.onMessage.addListener(function (res, sender, sendResponse) {
             }
             $('.process #time_avg').html('每张平均下载耗时' + Math.round(data.time_avg /10)/1000+ 's，将以' + Math.round(data.time_avg)/1000 + 's 间隔翻页请求')
         }
+    } else if (res && res.type === 'download_status') {
+        set_download_status(res.data && res.data.status ? res.data.status : 'idle');
     }
     sendResponse('done');
     return true
@@ -269,6 +286,21 @@ function suc_show() {
     $('.select-position').show();
     $('.name').show();
 
+}
+
+function set_download_status(status) {
+    let running = status === 'running';
+    let status_text = {
+        idle: '暂无下载任务',
+        running: '正在下载，可停止',
+        paused: '已暂停，继续后可停止',
+        stopped: '已停止',
+        complete: '下载完成'
+    };
+    $('#down-cancel')
+        .prop('disabled', !running)
+        .toggleClass('is-disabled', !running)
+        .attr('title', status_text[status] || status_text.idle);
 }
 
 function escape_html(str) {

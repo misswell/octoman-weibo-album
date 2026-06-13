@@ -146,6 +146,10 @@ function uid_from_url(url) {
     if (!url) {
         return '';
     }
+    matched = url.match(/photo\.weibo\.com\/(\d+)/);
+    if (matched && matched[1]) {
+        return matched[1];
+    }
     matched = url.match(/weibo\.com\/u\/(\d+)/);
     if (matched && matched[1]) {
         return matched[1];
@@ -176,7 +180,14 @@ function name_from_page(uid) {
         $('a[href*="/u/' + uid + '"] span[title]').first().attr('title') ||
         $('[href*="/u/' + uid + '"]').first().text();
     name = $.trim(name || '');
-    name = name.replace(/的微博.*$/, '').replace(/微博.*$/, '').replace(/[\s_-]*微博个人主页.*$/, '').replace(/[\s_-]*Weibo.*$/, '');
+    name = name
+        .replace(/的专辑\s*-\s*微相册.*$/, '')
+        .replace(/的相册\s*-\s*微相册.*$/, '')
+        .replace(/[\s_-]*微相册.*$/, '')
+        .replace(/的微博.*$/, '')
+        .replace(/微博.*$/, '')
+        .replace(/[\s_-]*微博个人主页.*$/, '')
+        .replace(/[\s_-]*Weibo.*$/, '');
     name = name.replace(/^@\s*/, '');
     return name;
 }

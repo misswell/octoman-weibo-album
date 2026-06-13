@@ -5,11 +5,12 @@
 ## 功能
 
 - 读取当前微博页面对应用户的相册列表
+- 支持从 `weibo.com/u/{uid}` 与 `photo.weibo.com/{uid}/albums` 页面识别用户
 - 支持从列表页识别多个用户，并切换下载对象
 - 批量下载单个相册图片，按“用户昵称_相册名”创建下载目录
 - 支持下载比例选择，例如 100%、50%、10%
 - 支持下载并发数设置
-- 支持暂停、继续、停止下载队列
+- 支持暂停、继续、停止下载队列，停止按钮会随下载状态自动启用或置灰
 - 图片文件名尽量保持微博原始图片名
 - 处理 `sinaimg.cn` / `sinajs.cn` 图片防盗链，避免下载成 HTML 文件
 - 下载进度显示“已成功下载数量 / 相册总数量”
@@ -26,7 +27,7 @@
 
 ## 使用
 
-1. 打开微博用户主页，例如 `https://weibo.com/u/{uid}`
+1. 打开微博用户主页或微相册页面，例如 `https://weibo.com/u/{uid}`、`https://photo.weibo.com/{uid}/albums`
 2. 点击浏览器右上角的扩展图标
 3. 等待相册列表加载完成
 4. 可按需调整下载比例、并发数量、完成后是否打开文件夹
@@ -40,16 +41,22 @@ WeiboAlbum/用户昵称_相册名/
 
 ## 当前接口策略
 
-新版微博部分接口会对某些 UID 返回 `Forbidden`。当前扩展优先使用仍可访问的相册接口：
+新版微博部分接口会对某些 UID 返回 `Forbidden`。当前扩展只使用 `photo.weibo.com` 相册接口：
 
 - `https://photo.weibo.com/albums/get_all`
 - `https://photo.weibo.com/photos/get_all`
-- `https://weibo.com/ajax/profile/getImageWall`，作为图片墙兜底
 
 已避免依赖下列容易失效或被拦截的接口：
 
 - `https://weibo.com/ajax/profile/info`
 - `https://weibo.com/ajax/profile/getAlbumDetail`
+- `https://weibo.com/ajax/profile/getImageWall`
+
+弹窗顶部“当前用户”会跳转到标准微相册地址：
+
+```text
+https://photo.weibo.com/{uid}/albums
+```
 
 ## 常见问题
 
@@ -60,6 +67,10 @@ WeiboAlbum/用户昵称_相册名/
 ### 下载成 HTML 文件
 
 通常是图片防盗链导致。当前版本会先以微博来源请求图片 Blob，再通过 Chrome 下载 API 保存。如果仍出现该问题，可以在扩展后台控制台查看 `[download:fetch:error]` 日志。
+
+### 并发下载时文件名变成“下载.jpeg”
+
+扩展会在 Blob 下载阶段记录下载任务和原始文件名的对应关系，再通过 Chrome 下载命名回调恢复为微博原图文件名。若看到 `[download:filename:missing]` 日志，说明 Chrome 没有把该任务关联回扩展记录，可保留日志继续排查。
 
 ### 文件夹名称不是目标用户
 
@@ -97,4 +108,15 @@ utils/                 公共工具和配置
 
 ## 版本
 
-当前 manifest 版本：`0.3.0`
+当前 manifest 版本：`0.3.1`
+
+### 0.3.1
+
+- 移除对 `profile/info`、`getAlbumDetail`、`getImageWall` 等易返回 `Forbidden` 的接口依赖
+- 使用 `photo.weibo.com/albums/get_all` 与 `photo.weibo.com/photos/get_all` 读取相册和分页照片
+- 修复 `photo.weibo.com/{uid}/albums` 页面用户名识别，避免把标题后缀识别为昵称
+- 修复弹窗顶部当前用户链接，统一跳转到 `https://photo.weibo.com/{uid}/albums`
+- 修复并发 Blob 下载时文件名偶发变成“下载.jpeg”的问题
+- 优化下载队列调度，避免空闲时持续轮询
+- 优化停止按钮状态，只有正在下载时允许点击
+- 移除 `_metadata` 目录加载问题，避免 Chrome 提示保留目录名错误

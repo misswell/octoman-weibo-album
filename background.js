@@ -26,6 +26,9 @@ var events = {
         //获取当前页面链接
         send_popup_message({type: 'album_complete', data: data}, 'album_complete');
     },
+    download_status: function (data) {
+        send_popup_message({type: 'download_status', data: data}, 'download_status');
+    },
     pop_info: function (data) {
         //获取当前页面链接
         send_popup_message({type: 'pop_info', data: data}, 'pop_info');
@@ -129,6 +132,7 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         window.page = 1;
         window.photo_list_temp = [];
         window['down_allow'] = down_allow;
+        set_download_status('running');
         let target_name = clean_user_name(name) || uid;
         if (!window['albumDetail' + album_id]) {
             window['albumDetail' + album_id] = {
@@ -173,7 +177,10 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         window['down_pause'] = !window['down_pause'];
         console.log(window['down_pause']);
         if (!window['down_pause']) {
+            set_download_status(has_active_downloads() ? 'running' : 'idle');
             scheduleQueueDrain();
+        } else {
+            set_download_status('paused');
         }
         sendResponse(window['down_pause']);
     } else if(request.type === 'window_get'){
@@ -190,6 +197,8 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         timeoutClear();
         arrayQueue.reset();
         clearQueueSchedule();
+        window['down_pause'] = false;
+        set_download_status('stopped');
         sendResponse(true);
     }
     return true;
@@ -208,41 +217,19 @@ function config_set(data, callback){
     return true;
 }
 
-function parse_target_name(res, expected_uid) {
-    let data = res && res.data ? res.data : res;
-    let candidates = [
-        data && data.user,
-        data && data.userInfo,
-        data && data.profile,
-        data
-    ];
-    for (let i in candidates) {
-        let user = candidates[i];
-        if (!user) {
-            continue;
-        }
-        if (expected_uid && !user_matches_uid(user, expected_uid)) {
-            continue;
-        }
-        let name = clean_user_name(user.screen_name || user.name || user.nick_name || user.nickname);
-        if (name) {
-            return name;
-        }
-    }
-    return '';
-}
-
 function clean_user_name(name) {
     return (name || '').toString().replace(/^@\s*/, '').trim();
 }
 
-function user_matches_uid(user, expected_uid) {
-    expected_uid = expected_uid ? expected_uid.toString() : '';
-    let actual_uid = user && (user.idstr || user.id || user.uid || user.user_id || user.profile_uid);
-    if (!expected_uid || !actual_uid) {
-        return true;
+function photo_album_referrer(uid) {
+    return 'https://photo.weibo.com/' + uid + '/albums?rd=1';
+}
+
+function photo_detail_referrer(uid, album_id, type) {
+    if (type == 3) {
+        return 'https://photo.weibo.com/' + uid + '/talbum/index';
     }
-    return actual_uid.toString() === expected_uid;
+    return 'https://photo.weibo.com/' + uid + '/albums/detail/album_id/' + album_id;
 }
 
 //获取相册列表
@@ -290,26 +277,22 @@ function album_get(info) {
                 if (window['albumList' + uid].length > 0) {
                     events.album_list({list: window['albumList' + uid], name: name, uid: uid.toString()})
                 } else {
-                    album_get_image_wall(info, '旧相册接口未返回相册')
+                    events.album_fail('相册列表为空或不可访问，请确认当前页面用户 UID 是否正确')
                 }
             }
         } else {
-            album_get_image_wall(info, '相册列表请求错误，code ' + res.code)
+            events.album_fail('相册列表请求错误，code ' + res.code)
         }
         console.log(res)
 
     }, function () {
-        album_get_image_wall(info, '相册列表请求没有响应')
-    })
+        events.album_fail('相册列表请求没有响应')
+    }, photo_album_referrer(uid))
 }
 
 let base_folder = 'WeiboAlbum';
 
 function down_url(uid, album_id, type, folder) {
-    if (type === 'image_wall') {
-        down_image_wall(uid, album_id, folder);
-        return;
-    }
     let url = 'https://photo.weibo.com/photos/get_all';
     let page;
     let photo_list_temp;
@@ -332,7 +315,7 @@ function down_url(uid, album_id, type, folder) {
     console.log('down_url start',uid, album_id, type, folder);
     fetch_json(url, data, function (res) {
         if (res.code === 0) {
-            let photo_list = res.data['photo_list'];
+            let photo_list = res.data['photo_list'] || [];
             let total = res.data['total'];
             update_album_total(album_id, total);
             let info_list = [];
@@ -370,207 +353,12 @@ function down_url(uid, album_id, type, folder) {
                     window['photo_list_temp' + album_id] = [];
                 }
             }
-        } else if (type == 3) {
-            down_image_wall(uid, album_id, folder);
-        } else {
-            redo(uid, album_id, type, folder, 2)
-        }
+    } else {
+        redo(uid, album_id, type, folder, 2)
+    }
     }, function () {
-        if (type == 3) {
-            down_image_wall(uid, album_id, folder);
-        } else {
-            redo(uid, album_id, type, folder, 3);
-        }
-    })
-}
-
-function album_get_image_wall(info, reason) {
-    let uid = info.uid;
-    let name = info.name;
-    let album_id = 'image_wall_' + uid;
-    fetch_image_wall_page(uid, 0, function (res) {
-        if (res.error) {
-            events.album_fail(reason + '，图片墙接口也不可用：' + res.error);
-            return;
-        }
-        if (res.user_name) {
-            name = res.user_name;
-        }
-        let photo_list = res.photo_list || [];
-        let first = photo_list[0] || {};
-        let album = {
-            album_id: album_id,
-            uid: uid.toString(),
-            caption: '全部图片',
-            cover_pic: first.link || 'https://img.t.sinajs.cn/t4/appstyle/photo/images/common/status_0.png',
-            type: 'image_wall',
-            count: {photos: res.total || photo_list.length || 0}
-        };
-        window['albumDetail' + album_id] = {
-            album_id: album.album_id,
-            caption: album.caption,
-            cover_pic: album.cover_pic,
-            type: album.type,
-            count: album.count.photos,
-            name: name
-        };
-        events.album_list({list: [album], name: name, uid: uid.toString()});
-    });
-}
-
-function down_image_wall(uid, album_id, folder) {
-    let sinceid = window['sinceid' + album_id];
-    if (sinceid === undefined || sinceid === null) {
-        sinceid = 0;
-    }
-    down_modern_album_page(uid, album_id, folder, sinceid, fetch_image_wall_page, function () {
-        if (!redo_image_wall(uid, album_id, folder)) {
-            enqueue_download_task({'type':'finish','data':album_id});
-        }
-    });
-}
-
-function down_modern_album_page(uid, album_id, folder, sinceid, fetch_page, fail_callback) {
-    if (!window['photo_seen' + album_id]) {
-        window['photo_seen' + album_id] = {};
-    }
-    fetch_page(uid, sinceid, function (res) {
-        if (res.error) {
-            typeof fail_callback === 'function' && fail_callback(res);
-            return;
-        }
-        let photo_list = res.photo_list || [];
-        update_album_total(album_id, res.total || photo_list.length);
-        let info_list = [];
-        let queue;
-        for (let i in photo_list) {
-            if (!photo_list[i].link || window['photo_seen' + album_id][photo_list[i].link]) {
-                continue;
-            }
-            window['photo_seen' + album_id][photo_list[i].link] = true;
-            info_list.push(photo_list[i]);
-        }
-        if (info_list.length > 0) {
-            for (let i in info_list) {
-                setTimeout(function () {
-                    queue = [info_list[i]['link'], base_folder + '/' + folder + '/' + info_list[i]['name'], album_id];
-                    enqueue_download_task({'type':'down','data':queue});
-                }, 10 * i);
-            }
-            window['timer'+album_id] += info_list.length;
-            window['redo' + album_id] = 0;
-        }
-        if (res.sinceid && res.sinceid !== sinceid && photo_list.length > 0) {
-            window['sinceid' + album_id] = res.sinceid;
-            timeoutList(setTimeout(function () {
-                down_modern_album_page(uid, album_id, folder, res.sinceid, fetch_page, fail_callback);
-            }, DELAY_PAGE * 1000));
-        } else {
-            enqueue_download_task({'type':'finish','data':album_id});
-        }
-    });
-}
-
-function redo_image_wall(uid, album_id, folder) {
-    if (!window['redo' + album_id]) {
-        window['redo' + album_id] = 0
-    }
-    if (window['redo' + album_id] < 3) {
-        window['redo' + album_id] = window['redo' + album_id] + 1;
-        timeoutList(setTimeout(function () {
-            down_image_wall(uid, album_id, folder);
-        }, DELAY_PAGE * 1000));
-        return true;
-    }
-    return false;
-}
-
-function fetch_image_wall_page(uid, sinceid, callback) {
-    let url = 'https://weibo.com/ajax/profile/getImageWall';
-    let data = {
-        uid: uid.toString(),
-        sinceid: sinceid || 0,
-        has_album: true,
-        __rnd: (new Date()).getTime()
-    };
-    fetch_modern_photo_page(url, data, callback, weibo_profile_referrer(uid));
-}
-
-function fetch_modern_photo_page(url, request_data, callback, referrer) {
-    fetch_json(url, request_data, function (res) {
-            if (res && (res.ok === 0 || (res.code && res.code !== 0))) {
-                callback({error: res.msg || res.message || ('code ' + res.code)});
-                return;
-            }
-            let data = res && res.data ? res.data : res;
-            let raw_list = [];
-            if (data) {
-                raw_list = data.list || data.photo_list || data.pics || data.cards || data.statuses || [];
-                if (!raw_list.length && typeof raw_list === 'object') {
-                    raw_list = Object.values(raw_list);
-                }
-            }
-            let photo_list = parse_image_wall_list(raw_list);
-            let expected_uid = expected_uid_from_request(request_data);
-            let user_name = extract_user_name(raw_list, expected_uid) || extract_user_name(data, expected_uid);
-            let next_sinceid = data ? (data.since_id || data.sinceid || data.next_since_id || data.next_sinceid) : 0;
-            let total = data ? (data.total || data.total_number || data.count) : 0;
-            callback({photo_list: photo_list, sinceid: next_sinceid, total: total, user_name: user_name});
-        }, function (status) {
-            callback({error: status || 'request error'});
-        }, referrer);
-}
-
-function extract_user_name(value, expected_uid) {
-    if (!value) {
-        return '';
-    }
-    if (Array.isArray(value)) {
-        for (let i in value) {
-            let name = extract_user_name(value[i], expected_uid);
-            if (name) {
-                return name;
-            }
-        }
-        return '';
-    }
-    if (typeof value !== 'object') {
-        return '';
-    }
-    let priority_keys = ['mblog', 'status', 'blog'];
-    for (let i in priority_keys) {
-        let item = value[priority_keys[i]];
-        let user_name = parse_target_name(item && item.user ? item.user : item, expected_uid);
-        if (user_name) {
-            return user_name;
-        }
-    }
-    let direct = parse_target_name(value, expected_uid);
-    if (direct) {
-        return direct;
-    }
-    let keys = ['mblog', 'status', 'blog', 'card', 'user', 'userInfo', 'retweeted_status'];
-    for (let i in keys) {
-        let name = extract_user_name(value[keys[i]], expected_uid);
-        if (name) {
-            return name;
-        }
-    }
-    if (value.cards || value.list || value.statuses) {
-        return extract_user_name(value.cards || value.list || value.statuses, expected_uid);
-    }
-    return '';
-}
-
-function expected_uid_from_request(request_data) {
-    if (request_data.uid) {
-        return request_data.uid.toString();
-    }
-    return '';
-}
-
-function weibo_profile_referrer(uid) {
-    return 'https://weibo.com/u/' + uid + '?tabtype=album';
+        redo(uid, album_id, type, folder, 3);
+    }, photo_detail_referrer(uid, album_id, type))
 }
 
 function fetch_json(url, data, success, fail, referrer) {
@@ -580,9 +368,10 @@ function fetch_json(url, data, success, fail, referrer) {
 
     get_weibo_xsrf_token(function (xsrf_token) {
         let headers = {
-            'Accept': 'application/json, text/plain, */*',
+            'Accept': '*/*',
             'X-Requested-With': 'XMLHttpRequest',
-            'Client-Version': '3.0.0'
+            'Client-Version': '3.0.0',
+            'Content-Type': 'application/x-www-form-urlencoded'
         };
         if (xsrf_token) {
             headers['X-XSRF-TOKEN'] = xsrf_token;
@@ -629,94 +418,11 @@ function get_weibo_xsrf_token(callback) {
     });
 }
 
-function parse_image_wall_list(list) {
-    let photo_list = [];
-    if (!list || !list.length) {
-        return photo_list;
-    }
-    for (let i in list) {
-        photo_list = photo_list.concat(parse_image_wall_item(list[i]));
-    }
-    return photo_list;
-}
-
-function parse_image_wall_item(item) {
-    let photo_list = [];
-    if (!item) {
-        return photo_list;
-    }
-    if (item.pics && item.pics.length) {
-        for (let i in item.pics) {
-            photo_list = photo_list.concat(parse_image_wall_item(item.pics[i]));
-        }
-    }
-    if (item.pic_infos) {
-        for (let pid in item.pic_infos) {
-            let pic = item.pic_infos[pid];
-            let link = pick_pic_url(pic);
-            if (link) {
-                photo_list.push({link: link, name: filename_from_pic(pid, link)});
-            }
-        }
-    }
-    if (item.pic_info) {
-        let link = pick_pic_url(item.pic_info);
-        if (link) {
-            let pid = item.pic_info.pid || item.pic_info.pic_id || item.pid || item.id || '';
-            photo_list.push({link: link, name: filename_from_pic(pid, link)});
-        }
-    }
-    let link = pick_pic_url(item);
-    if (link) {
-        let pid = item.pid || item.pic_id || item.object_id || item.id || '';
-        photo_list.push({link: link, name: filename_from_pic(pid, link)});
-    }
-    return photo_list;
-}
-
-function pick_pic_url(pic) {
-    if (!pic) {
-        return '';
-    }
-    let keys = ['largest', 'original', 'mw2000', 'large', 'bmiddle', 'middleplus', 'thumbnail'];
-    for (let i in keys) {
-        if (pic[keys[i]] && pic[keys[i]].url && is_weibo_image_url(pic[keys[i]].url)) {
-            return normalize_weibo_image_url(pic[keys[i]].url);
-        }
-    }
-    let urls = [pic.pic_large, pic.large, pic.pic, pic.url];
-    for (let i in urls) {
-        if (urls[i] && is_weibo_image_url(urls[i])) {
-            return normalize_weibo_image_url(urls[i]);
-        }
-    }
-    return '';
-}
-
 function is_weibo_image_url(url) {
     if (!url || typeof url !== 'string') {
         return false;
     }
     return /^https?:\/\/[^\/]*(sinaimg|sinajs)\.cn\//i.test(url);
-}
-
-function normalize_weibo_image_url(url) {
-    if (!is_weibo_image_url(url)) {
-        return '';
-    }
-    return url.replace(/\/(thumb\d+|thumbnail|orj\d+|mw\d+|bmiddle|small|square)\//, '/large/');
-}
-
-function filename_from_pic(pid, link) {
-    let name = pid || '';
-    if (!name && link) {
-        name = link.split('?')[0].split('/').pop();
-    }
-    name = name || ((new Date()).getTime()).toString();
-    if (!ext(name)) {
-        name = name + (ext(link.split('?')[0]) || '.jpg');
-    }
-    return reg_filename(name);
 }
 
 let timeoutQueue = new ArrayQueue();
@@ -785,6 +491,7 @@ function reset_album_info(album_id){
         info:'下载完成',
         album_detail: window['albumDetail' + album_id]
     });
+    set_download_status(has_active_downloads() ? 'running' : 'complete');
     if (window['download_folder' + album_id] && window['open'+album_id]) {
         show_folder(window['download_folder' + album_id])
     }
@@ -868,7 +575,12 @@ function down(url, name, album_id, callback) {
 }
 
 function download_direct(download_options, url, name, album_id, startStamp, callback) {
+    let filename_token = download_options.filenameToken || '';
+    delete download_options.filenameToken;
     chrome.downloads.download(download_options, function (res) {
+        if (res && filename_token) {
+            remember_data_url_filename_by_id(res, filename_token);
+        }
         window['downCurrent'] =  window['downCurrent'] - 1;
         // if (!window['downTime' + album_id]) {
         //     window['downTime' + album_id] = []
@@ -957,8 +669,13 @@ function download_weibo_image(url, name, album_id, startStamp, callback) {
     }).then(function (blob) {
         return blob_to_data_url(blob);
     }).then(function (data_url) {
-        queue_data_url_filename(name);
-        download_direct({url: data_url, filename: name, conflictAction: 'overwrite'}, url, name, album_id, startStamp, callback);
+        let filename_token = queue_data_url_filename(name);
+        download_direct({
+            url: append_data_url_token(data_url, filename_token),
+            filename: name,
+            conflictAction: 'overwrite',
+            filenameToken: filename_token
+        }, url, name, album_id, startStamp, callback);
     }).catch(function (e) {
         window['downCurrent'] =  window['downCurrent'] - 1;
         console.warn('[download:fetch:error]', {
@@ -983,15 +700,63 @@ function download_weibo_image(url, name, album_id, startStamp, callback) {
     });
 }
 
-let pendingDataUrlFilenames = [];
+let pendingDataUrlFilenames = {};
+let pendingDataUrlFilenameIds = {};
 
 function queue_data_url_filename(filename) {
-    pendingDataUrlFilenames.push({
+    let token = 'octoman_' + (new Date()).getTime() + '_' + Math.random().toString(36).slice(2);
+    pendingDataUrlFilenames[token] = {
         filename: filename,
         time: (new Date()).getTime()
-    });
-    if (pendingDataUrlFilenames.length > 200) {
-        pendingDataUrlFilenames = pendingDataUrlFilenames.slice(-200);
+    };
+    prune_data_url_filenames();
+    return token;
+}
+
+function remember_data_url_filename_by_id(download_id, token) {
+    if (pendingDataUrlFilenames[token]) {
+        pendingDataUrlFilenameIds[download_id] = token;
+    }
+}
+
+function append_data_url_token(data_url, token) {
+    return data_url + '#octoman_filename=' + encodeURIComponent(token);
+}
+
+function data_url_filename_token(url) {
+    let marker = '#octoman_filename=';
+    let index = (url || '').lastIndexOf(marker);
+    if (index < 0) {
+        return '';
+    }
+    return decodeURIComponent(url.substring(index + marker.length));
+}
+
+function take_data_url_filename(item) {
+    let token = data_url_filename_token(item.url) || pendingDataUrlFilenameIds[item.id];
+    let pending = token ? pendingDataUrlFilenames[token] : null;
+    if (token) {
+        delete pendingDataUrlFilenames[token];
+        delete pendingDataUrlFilenameIds[item.id];
+    }
+    return pending;
+}
+
+function prune_data_url_filenames() {
+    let now = (new Date()).getTime();
+    let tokens = Object.keys(pendingDataUrlFilenames);
+    for (let i in tokens) {
+        let token = tokens[i];
+        if (!pendingDataUrlFilenames[token] || now - pendingDataUrlFilenames[token].time > 10 * 60 * 1000) {
+            delete pendingDataUrlFilenames[token];
+        }
+    }
+    let ids = Object.keys(pendingDataUrlFilenameIds);
+    for (let i in ids) {
+        let download_id = ids[i];
+        if (!pendingDataUrlFilenames[pendingDataUrlFilenameIds[download_id]]) {
+            delete pendingDataUrlFilenameIds[download_id];
+        }
     }
 }
 
@@ -1010,7 +775,7 @@ function blob_to_data_url(blob) {
 
 chrome.downloads.onDeterminingFilename.addListener(function (item, suggest) {
     if (item && item.url && item.url.indexOf('data:') === 0) {
-        let pending = pendingDataUrlFilenames.shift();
+        let pending = take_data_url_filename(item);
         if (pending && pending.filename) {
             console.log('[download:filename:suggest]', {
                 downloadId: item.id,
@@ -1018,11 +783,14 @@ chrome.downloads.onDeterminingFilename.addListener(function (item, suggest) {
                 suggestedFilename: pending.filename
             });
             suggest({filename: pending.filename, conflictAction: 'overwrite'});
-            return;
+            return true;
         }
         console.warn('[download:filename:missing]', {
             downloadId: item.id,
-            originalFilename: item.filename
+            originalFilename: item.filename,
+            hasToken: !!data_url_filename_token(item.url),
+            hasIdMapping: !!pendingDataUrlFilenameIds[item.id],
+            pendingCount: Object.keys(pendingDataUrlFilenames).length
         });
     }
 });
@@ -1078,6 +846,7 @@ downCurrent = 0;
 albumList = [];
 down_allow = 1;
 down_pause = false;
+download_status = 'idle';
 window['queueDrainTimer'] = null;
 config_get('down_allow', function (value) {
     down_allow = value !== null ? value : 1;
@@ -1086,7 +855,27 @@ config_get('down_allow', function (value) {
 
 function enqueue_download_task(task) {
     arrayQueue.push(task);
+    if (task && task.type === 'down') {
+        set_download_status('running');
+    }
     scheduleQueueDrain();
+}
+
+function has_active_downloads() {
+    return window['downCurrent'] > 0 || arrayQueue.length() > 0;
+}
+
+function set_download_status(status) {
+    if (window['download_status'] === status) {
+        return;
+    }
+    window['download_status'] = status;
+    events.download_status({
+        status: status,
+        pending: arrayQueue.length(),
+        downCurrent: window['downCurrent'] || 0,
+        paused: !!window['down_pause']
+    });
 }
 
 function clearQueueSchedule() {
