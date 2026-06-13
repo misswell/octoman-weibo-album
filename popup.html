@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>
+        Blacklist Checking
+    </title>
+    <meta http-equiv="content-type" content="txt/html; charset=utf-8"/>
+    <link rel="stylesheet" type="text/css" href="popup.css"/>
+    <script type="text/javascript" src="jquery/jquery-3.4.1.js"></script>
+    <script type="text/javascript" src="popup.js"></script>
+</head>
+<body>
+<div id="login_suc" style="display: block;">
+    <ul class="process"><div style="position: relative;width:100%;">
+        <span>注意：务必关闭 "下载前询问每个文件的保存位置"</span>
+        <img src="/img/warning.png" class="warning-icon"></div>
+        <span class="warning-more">
+            <div>1、务必关闭 "下载前询问每个文件的保存位置，否则会出现非常多的对话框</div>
+            <div>2、需要登录微博，否则无法获取相册详情</div>
+            <div>3、下载数量不一致是因为用户删除了或设置了隐藏</div>
+        </span>
+    </ul>
+    <ul class="select-position" hidden><span class="user-list"></span>
+
+        <select name="" id="ratio">
+            <option value="1">100%</option>
+            <option value="0.5">50%</option>
+            <option value="0.25">25%</option>
+            <option value="0.10">10%</option>
+            <option value="0.05">5%</option>
+            <option value="0.02">2%</option>
+            <option value="0.01">1%</option>
+        </select>
+
+        <span class="user-select"></span></ul>
+    <ul class="name" hidden>当前用户：</ul>
+    <ul class="album-loading">
+        <img src="/img/loading.gif" alt="">
+    </ul>
+    <ul class="album-list">
+
+    </ul>
+    <ul class="option-line">
+        <a href="#" id="author">问题反馈</a>
+        <span class="flex-center">
+            <input type="checkbox" id="open-folder" checked>
+            <span class="tit">完成打开文件夹</span>
+        </span>
+        <span class="flex-center">
+        <select name="" id="con-current">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+            <option value="10">10</option>
+        </select>
+        <span class="tit">并发</span>
+        </span>
+    </ul>
+    <ul>
+
+        <input type="button" id="down-pause" value="暂停">
+        <input type="button" id="down-cancel" value="停止">
+    </ul>
+</div>
+</body>
+</html>
