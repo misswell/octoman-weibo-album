@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Octo微博相册批量下载",
-  "version": "0.3.4",
+  "version": "0.3.14",
   "description":"一键下载微博相册的插件",
   "background": {
     "service_worker": "background.js"
@@ -23,6 +23,7 @@
     "downloads",
     "cookies",
     "declarativeNetRequest",
+    "offscreen",
     "storage",
     "tabs"
   ],

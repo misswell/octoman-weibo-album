@@ -274,6 +274,7 @@ select {
     justify-content: space-between;
     gap: 8px;
     padding: 10px;
+    flex-wrap: wrap;
 }
 
 .toggle {
@@ -288,6 +289,24 @@ select {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.package-size-field {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #334e68;
+    margin-left: auto;
+}
+
+.package-size-field input {
+    width: 58px;
+    height: 26px;
+    border: 1px solid #bcccdc;
+    border-radius: 6px;
+    color: #243b53;
+    background: #fff;
+    padding: 0 6px;
 }
 
 .actions {
@@ -379,6 +398,15 @@ input[type="button"].is-disabled {
     flex: 0 0 auto;
 }
 
+.process-meta {
+    width: 148px;
+    flex: 0 0 148px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+}
+
 .process-li-actions input[type='button'] {
     height: 24px;
     min-width: 40px;
@@ -411,8 +439,60 @@ input[type="button"].is-disabled {
     font-size: 11px;
     color: #627d98;
     white-space: nowrap;
-    min-width: 48px;
     text-align: right;
+}
+
+.package-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.package-progress[hidden] {
+    display: none;
+}
+
+.package-progress-bar {
+    height: 5px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: #d9e2ec;
+}
+
+.package-progress-bar span {
+    display: block;
+    height: 100%;
+    width: 0;
+    border-radius: inherit;
+    background: #1b66d2;
+}
+
+.package-progress-text {
+    color: #627d98;
+    font-size: 10px;
+    line-height: 1.2;
+    text-align: right;
+    white-space: normal;
+}
+
+.process-activity {
+    color: #829ab1;
+    font-size: 10px;
+    line-height: 1.2;
+    text-align: right;
+    word-break: break-all;
+}
+
+.process-activity.running {
+    color: #1b66d2;
+}
+
+.process-activity.error {
+    color: #b91c1c;
+}
+
+.process-activity.complete {
+    color: #2f855a;
 }
 
 #time_avg {

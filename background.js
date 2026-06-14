@@ -107,8 +107,10 @@ function getUrlParams(url) {
 chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
     // console.log('onMessage.addListener', request);
     if (request.type === 'current_page') {
+        events.pop_info({activity: '正在识别当前微博页面和当前用户'});
         getCurrentTab(function (res) {
             console.log('current_page', res);
+            events.pop_info({activity: res ? '已识别当前用户，正在获取相册列表' : '未识别到可下载的微博用户'});
             sendResponse(res)
         })
     } else if (request.type === 'down_album') {
@@ -123,8 +125,24 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         let ratio = data.ratio;
         let open = data.open;
         let down_allow = data.down_allow;
+        let package_download = data.package_download == 1 || data.package_download === true;
+        let package_size = normalize_package_size(data.package_size);
         window['ratio'+album_id] = ratio;
         window['open'+album_id] = open;
+        window['package_download' + album_id] = package_download;
+        window['package_size' + album_id] = package_size;
+        window['package_buffer' + album_id] = [];
+        window['package_index' + album_id] = 1;
+        window['package_done' + album_id] = 0;
+        window['package_total' + album_id] = 0;
+        window['package_total_extra' + album_id] = 0;
+        window['package_processed' + album_id] = 0;
+        window['package_current_index' + album_id] = 0;
+        window['package_current_done' + album_id] = 0;
+        window['package_current_total' + album_id] = 0;
+        window['package_builders_' + album_id] = {};
+        window['package_open_builder_' + album_id] = null;
+        set_album_activity(album_id, '正在初始化下载参数：比例 ' + ratio + '，并发 ' + down_allow + (package_download ? ('，打包每包 ' + package_size + ' 张') : '，逐张下载'), 'running');
         window['download_suc' + album_id] = 0;
         window['download_fail' + album_id] = 0;
         window['timer'+album_id] = 0;
@@ -134,6 +152,7 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         window['down_allow'] = down_allow;
         window['down_stopped'] = false;
         window['album_stopped_' + album_id] = false;
+        window['album_removed_' + album_id] = false;
         set_download_status('running');
         let target_name = clean_user_name(name) || uid;
         if (!window['albumDetail' + album_id]) {
@@ -151,14 +170,17 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
             window['albumDetail' + album_id].type = window['albumDetail' + album_id].type || type;
         }
         update_album_total(album_id, count);
+        update_package_total(album_id);
         let folder = target_name + '_' + caption;
         register_download_session(uid, album_id, type, folder);
-        console.log('down_album target folder', {uid: uid, target_name: target_name, caption: caption, folder: folder});
+        console.log('down_album target folder', {uid: uid, target_name: target_name, caption: caption, folder: folder, package_download: package_download, package_size: package_size});
+        emit_album_progress(album_id);
         down_url(uid, album_id, type, folder);
         sendResponse(true)
     } else if (request.type === 'album_get') {
         let info = request.data;
         console.log('album_get data', info);
+        events.pop_info({activity: '正在获取用户 ' + (clean_user_name(info.name) || info.uid) + ' 的相册列表第 1 页'});
         window['albumPage' + info.uid] = 1;
         window['albumList' + info.uid] = [];
         album_get(info);
@@ -190,6 +212,7 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         timeoutClear();
         clearQueueSchedule();
         window['down_stopped'] = true;
+        abort_all_active_tasks();
         set_download_status('stopped');
         sendResponse(get_download_state('stopped'));
     } else if(request.type === 'down_resume'){
@@ -201,21 +224,32 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
     } else if(request.type === 'album_stop'){
         let album_id = request.album_id;
         window['album_stopped_' + album_id] = true;
-        clear_album_queue_tasks(album_id);
-        sendResponse({album_id: album_id, stopped: true});
+        abort_album_active_tasks(album_id);
+        clear_album_timers(album_id);
+        set_album_activity(album_id, '已暂停，当前请求已停止，队列会保留到继续时恢复', 'stopped');
+        emit_album_progress(album_id);
+        sendResponse({album_id: album_id, stopped: true, suc: window['download_suc' + album_id] || 0, total: get_album_total(album_id), package_progress: get_package_progress(album_id), activity: get_album_activity(album_id)});
     } else if(request.type === 'album_resume'){
         let album_id = request.album_id;
         window['album_stopped_' + album_id] = false;
+        window['album_removed_' + album_id] = false;
         let session = (window['downloadSessions'] || {})[album_id];
         if (session && !window['download_finished' + album_id]) {
+            set_album_activity(album_id, '正在继续下载队列', 'running');
+            emit_album_progress(album_id);
+            scheduleQueueDrain();
             down_url(session.uid, session.album_id, session.type, session.folder);
         }
-        sendResponse({album_id: album_id, suc: window['download_suc' + album_id] || 0, total: get_album_total(album_id)});
+        sendResponse({album_id: album_id, suc: window['download_suc' + album_id] || 0, total: get_album_total(album_id), package_progress: get_package_progress(album_id), activity: get_album_activity(album_id)});
     } else if(request.type === 'album_remove'){
         let album_id = request.album_id;
         clear_album_queue_tasks(album_id);
         window['album_stopped_' + album_id] = true;
+        window['album_removed_' + album_id] = true;
         window['download_finished' + album_id] = true;
+        abort_album_active_tasks(album_id);
+        clear_album_timers(album_id);
+        cleanup_album_package_builders(album_id);
         if (window['downloadSessions']) {
             delete window['downloadSessions'][album_id];
         }
@@ -227,6 +261,20 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         delete window['photo_list_temp' + album_id];
         delete window['redo' + album_id];
         delete window['timer' + album_id];
+        delete window['package_buffer' + album_id];
+        delete window['package_index' + album_id];
+        delete window['package_download' + album_id];
+        delete window['package_size' + album_id];
+        delete window['package_done' + album_id];
+        delete window['package_total' + album_id];
+        delete window['package_total_extra' + album_id];
+        delete window['package_processed' + album_id];
+        delete window['package_current_index' + album_id];
+        delete window['package_current_done' + album_id];
+        delete window['package_current_total' + album_id];
+        delete window['package_builders_' + album_id];
+        delete window['package_open_builder_' + album_id];
+        delete window['albumActivity' + album_id];
         sendResponse(true);
     } else if(request.type === 'get_all_progress'){
         let progress = [];
@@ -243,6 +291,8 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
                 suc: window['download_suc' + album_id] || 0,
                 fail: window['download_fail' + album_id] || 0,
                 total: get_album_total(album_id),
+                package_progress: get_package_progress(album_id),
+                activity: get_album_activity(album_id),
                 finished: !!window['download_finished' + album_id],
                 stopped: !!window['album_stopped_' + album_id]
             });
@@ -266,7 +316,11 @@ function config_set(data, callback){
 }
 
 function clean_user_name(name) {
-    return (name || '').toString().replace(/^@\s*/, '').trim();
+    name = (name || '').toString().replace(/^@\s*/, '').trim();
+    if (!name || /^(下载|微博|微相册|相册|主页|用户)$/i.test(name)) {
+        return '';
+    }
+    return name;
 }
 
 function photo_album_referrer(uid) {
@@ -286,6 +340,9 @@ function album_get(info) {
     let name = clean_user_name(info.name) || uid.toString();
     window['albumPage' + uid] = window['albumPage' + uid] ? window['albumPage' + uid] : 1;
     window['albumList' + uid] = window['albumList' + uid] ? window['albumList' + uid] : [];
+    events.pop_info({
+        activity: '正在请求相册列表第 ' + window['albumPage' + uid] + ' 页，已读取 ' + window['albumList' + uid].length + ' 个相册'
+    });
 
     var url = 'https://photo.weibo.com/albums/get_all';
     let data = {
@@ -301,6 +358,9 @@ function album_get(info) {
         if (res.code === 0) {
             list = res.data['album_list'];
             if (list && list.length > 0) {
+                events.pop_info({
+                    activity: '相册列表第 ' + data.page + ' 页返回 ' + list.length + ' 个相册，正在整理封面和数量'
+                });
                 for (let i in list) {
                     window['albumDetail' + list[i]['album_id']] = {
                         album_id: list[i]['album_id'],
@@ -315,25 +375,37 @@ function album_get(info) {
                 total = res.data['total'];
                 if (total > window['albumList' + uid].length && list.length > 10) {
                     window['albumPage' + uid]++;
+                    events.pop_info({
+                        activity: '相册列表还有更多内容，准备获取第 ' + window['albumPage' + uid] + ' 页'
+                    });
                     album_get(info)
                 } else {
                     console.log("window['albumList'+uid]", window['albumList' + uid]);
+                    events.pop_info({
+                        activity: '相册列表读取完成，共 ' + window['albumList' + uid].length + ' 个相册'
+                    });
                     events.album_list({list: window['albumList' + uid], name: name, uid: uid.toString()})
                 }
             } else {
                 console.log("window['albumList'+uid]", window['albumList' + uid]);
                 if (window['albumList' + uid].length > 0) {
+                    events.pop_info({
+                        activity: '相册列表读取完成，共 ' + window['albumList' + uid].length + ' 个相册'
+                    });
                     events.album_list({list: window['albumList' + uid], name: name, uid: uid.toString()})
                 } else {
+                    events.pop_info({activity: '相册列表为空，无法继续下载'});
                     events.album_fail('相册列表为空或不可访问，请确认当前页面用户 UID 是否正确')
                 }
             }
         } else {
+            events.pop_info({activity: '相册列表请求失败：code ' + res.code});
             events.album_fail('相册列表请求错误，code ' + res.code)
         }
         console.log(res)
 
     }, function () {
+        events.pop_info({activity: '相册列表请求超时或没有响应'});
         events.album_fail('相册列表请求没有响应')
     }, photo_album_referrer(uid))
 }
@@ -341,7 +413,7 @@ function album_get(info) {
 let base_folder = 'WeiboAlbum';
 
 function down_url(uid, album_id, type, folder) {
-    if (window['album_stopped_' + album_id] || window['down_stopped']) {
+    if (is_album_paused_or_removed(album_id) || window['down_stopped']) {
         console.log('[download:page:skip:stopped]', {uid: uid, album_id: album_id, type: type, folder: folder});
         return;
     }
@@ -366,8 +438,10 @@ function down_url(uid, album_id, type, folder) {
         __rnd: (new Date()).getTime(),
     };
     console.log('down_url start',uid, album_id, type, folder);
+    set_album_activity(album_id, '正在获取相册图片列表第 ' + page + ' 页', 'running');
+    emit_album_progress(album_id);
     fetch_json(url, data, function (res) {
-        if (window['album_stopped_' + album_id] || window['down_stopped']) {
+        if (is_album_paused_or_removed(album_id) || window['down_stopped']) {
             console.log('[download:page:ignored:stopped]', {uid: uid, album_id: album_id, page: page});
             return;
         }
@@ -378,56 +452,85 @@ function down_url(uid, album_id, type, folder) {
             let info_list = [];
             let queue;
             console.log('photo_list page', page, photo_list);
+            set_album_activity(album_id, '第 ' + page + ' 页返回 ' + photo_list.length + ' 张图片，当前相册共 ' + total + ' 张', 'running');
+            emit_album_progress(album_id);
             if (photo_list.length > 0) {
                 if(window['ratio'+album_id] && window['timer'+album_id] > total*window['ratio'+album_id]){
+                    set_album_activity(album_id, '已达到下载比例限制，正在提交剩余打包任务', 'running');
+                    emit_album_progress(album_id);
+                    flush_package_items(album_id, folder);
                     enqueue_download_task({'type':'finish','data':album_id});
                     return;
                 }
                 window['timer'+album_id] += photo_list.length;
+                set_album_activity(album_id, '正在解析第 ' + page + ' 页图片地址，累计读取 ' + window['timer'+album_id] + ' 张', 'running');
+                emit_album_progress(album_id);
                 info_list = photo_list.map((item) => {
                     let link = item['pic_host'] + '/large/' + item['pic_name'];
                     let name_uni = ext(item['pic_name']) ? item['pic_name'] : item['pic_name'] + '.jpg';
                     return {link: link, name: name_uni}
                 });
-                for (let i in info_list) {
-                    setTimeout(function () {
-                        queue = [info_list[i]['link'],base_folder + '/' + folder + '/' + info_list[i]['name'], album_id];
+                if (is_package_download(album_id)) {
+                    set_album_activity(album_id, '正在把第 ' + page + ' 页的 ' + info_list.length + ' 张图片加入打包队列', 'running');
+                    enqueue_package_items(album_id, folder, info_list);
+                } else {
+                    set_album_activity(album_id, '正在把第 ' + page + ' 页的 ' + info_list.length + ' 张图片加入下载队列', 'running');
+                    for (let i in info_list) {
+                        setTimeout(function () {
+                            queue = [info_list[i]['link'],base_folder + '/' + folder + '/' + info_list[i]['name'], album_id];
 
-                        enqueue_download_task({'type':'down','data':queue});
+                            enqueue_download_task({'type':'down','data':queue});
 
-                    }, 10 * i);
+                        }, 10 * i);
+                    }
                 }
+                emit_album_progress(album_id);
                 window['photo_list_temp' + album_id] = [...photo_list_temp, ...info_list];
                 window['page' + album_id] = page + 1;
                 window['redo' + album_id] = 0;
+                set_album_activity(album_id, '第 ' + page + ' 页已入队，等待获取第 ' + window['page' + album_id] + ' 页', 'running');
+                emit_album_progress(album_id);
                 timeoutList(setTimeout(function () {
-                    if (!window['album_stopped_' + album_id] && !window['down_stopped']) {
+                    if (!is_album_paused_or_removed(album_id) && !window['down_stopped']) {
                         down_url(uid, album_id, type, folder);
                     }
-                }, DELAY_PAGE * 1000));
+                }, DELAY_PAGE * 1000), album_id);
             } else {
+                set_album_activity(album_id, '第 ' + page + ' 页没有更多图片，正在确认是否结束', 'running');
+                emit_album_progress(album_id);
                 if (!redo(uid, album_id, type, folder, 1)) {
                     console.log('all photo_list_temp', photo_list_temp);
+                    set_album_activity(album_id, '图片列表读取完成，正在提交最后一批打包任务', 'running');
+                    emit_album_progress(album_id);
+                    flush_package_items(album_id, folder);
                     window['page' + album_id] = 1;
                     window['photo_list_temp' + album_id] = [];
                 }
             }
     } else {
-        redo(uid, album_id, type, folder, 2)
+        set_album_activity(album_id, '第 ' + page + ' 页请求返回异常 code ' + res.code + '，准备重试', 'running');
+        emit_album_progress(album_id);
+        if (!redo(uid, album_id, type, folder, 2)) {
+            flush_package_items(album_id, folder);
+        }
     }
     }, function () {
-        if (window['album_stopped_' + album_id] || window['down_stopped']) {
+        if (is_album_paused_or_removed(album_id) || window['down_stopped']) {
             console.log('[download:page:fail:stopped]', {uid: uid, album_id: album_id, page: page});
             return;
         }
-        redo(uid, album_id, type, folder, 3);
-    }, photo_detail_referrer(uid, album_id, type))
+        set_album_activity(album_id, '第 ' + page + ' 页请求失败，准备重试', 'running');
+        emit_album_progress(album_id);
+        if (!redo(uid, album_id, type, folder, 3)) {
+            flush_package_items(album_id, folder);
+        }
+    }, photo_detail_referrer(uid, album_id, type), album_id)
 }
 
-function fetch_json(url, data, success, fail, referrer) {
+function fetch_json(url, data, success, fail, referrer, album_id) {
     let request_url = url + '?' + new URLSearchParams(data).toString();
     let timer = null;
-    let controller = new AbortController();
+    let controller = create_album_abort_controller(album_id);
 
     get_weibo_xsrf_token(function (xsrf_token) {
         let headers = {
@@ -457,9 +560,11 @@ function fetch_json(url, data, success, fail, referrer) {
             }
             return res.json();
         }).then(function (json) {
+            release_album_abort_controller(album_id, controller);
             typeof success === 'function' && success(json);
         }).catch(function (e) {
             clearTimeout(timer);
+            release_album_abort_controller(album_id, controller);
             console.log('fetch_json fail', request_url, e);
             typeof fail === 'function' && fail(e && e.message ? e.message : 'request error');
         });
@@ -481,18 +586,90 @@ function get_weibo_xsrf_token(callback) {
     });
 }
 
+let albumAbortControllers = {};
+
+function is_album_removed(album_id) {
+    let sessions = window['downloadSessions'] || {};
+    return !!window['album_removed_' + album_id] || (!!window['download_finished' + album_id] && !sessions[album_id]);
+}
+
+function is_album_paused(album_id) {
+    return !!window['album_stopped_' + album_id] || !!window['down_stopped'];
+}
+
+function is_album_paused_or_removed(album_id) {
+    return is_album_paused(album_id) || is_album_removed(album_id);
+}
+
+function create_album_abort_controller(album_id) {
+    let controller = new AbortController();
+    if (album_id) {
+        if (!albumAbortControllers[album_id]) {
+            albumAbortControllers[album_id] = [];
+        }
+        albumAbortControllers[album_id].push(controller);
+    }
+    return controller;
+}
+
+function release_album_abort_controller(album_id, controller) {
+    if (!album_id || !albumAbortControllers[album_id]) {
+        return;
+    }
+    albumAbortControllers[album_id] = albumAbortControllers[album_id].filter(function (item) {
+        return item !== controller;
+    });
+    if (albumAbortControllers[album_id].length === 0) {
+        delete albumAbortControllers[album_id];
+    }
+}
+
+function abort_album_active_tasks(album_id) {
+    let controllers = albumAbortControllers[album_id] || [];
+    for (let i in controllers) {
+        try {
+            controllers[i].abort();
+        } catch (e) {}
+    }
+    delete albumAbortControllers[album_id];
+}
+
+function abort_all_active_tasks() {
+    for (let album_id in albumAbortControllers) {
+        abort_album_active_tasks(album_id);
+    }
+}
+
 let timeoutQueue = new ArrayQueue();
-function timeoutList(timeId){
-    timeoutQueue.push(timeId)
+function timeoutList(timeId, album_id){
+    timeoutQueue.push({id: timeId, album_id: album_id || null})
 }
 function timeoutClear(){
-    let timeId;
+    let item;
     do{
-        timeId = timeoutQueue.pop();
-        if(timeId){
-            clearTimeout(timeId);
+        item = timeoutQueue.pop();
+        if(item){
+            clearTimeout(item.id || item);
         }
-    }while (timeId);
+    }while (item);
+}
+function clear_album_timers(album_id) {
+    let kept = [];
+    let item;
+    do {
+        item = timeoutQueue.pop();
+        if (item) {
+            let item_album_id = item.album_id || null;
+            if (item_album_id == album_id) {
+                clearTimeout(item.id || item);
+            } else {
+                kept.push(item);
+            }
+        }
+    } while (item);
+    for (let i in kept) {
+        timeoutQueue.push(kept[i]);
+    }
 }
 
 function redo(uid, album_id, type, folder, code) {
@@ -501,13 +678,17 @@ function redo(uid, album_id, type, folder, code) {
     }
     if (window['redo' + album_id] < code) {
         window['redo' + album_id] = window['redo' + album_id] + 1;
+        set_album_activity(album_id, '第 ' + (window['page' + album_id] || 1) + ' 页暂未拿到数据，准备第 ' + window['redo' + album_id] + ' 次重试', 'running');
+        emit_album_progress(album_id);
         timeoutList(setTimeout(function () {
-            if (!window['album_stopped_' + album_id] && !window['down_stopped']) {
+            if (!is_album_paused_or_removed(album_id) && !window['down_stopped']) {
                 down_url(uid, album_id, type, folder);
             }
-        }, DELAY_PAGE * 1000));
+        }, DELAY_PAGE * 1000), album_id);
         return true;
     } else {
+        set_album_activity(album_id, '相册分页读取结束，正在收尾下载队列', 'running');
+        emit_album_progress(album_id);
         enqueue_download_task({'type':'finish','data':album_id});
         return false;
     }
@@ -527,6 +708,7 @@ function update_album_total(album_id, total) {
     } else {
         window['albumDetail' + album_id].count = total;
     }
+    update_package_total(album_id);
 }
 
 function get_album_total(album_id) {
@@ -539,20 +721,93 @@ function get_album_total(album_id) {
     return downloaded > 0 ? downloaded : 0;
 }
 
+function get_album_target_total(album_id) {
+    let total = get_album_total(album_id);
+    let ratio = parseFloat(window['ratio' + album_id]);
+    if (total > 0 && ratio > 0 && ratio < 1) {
+        return Math.ceil(total * ratio);
+    }
+    return total;
+}
+
+function update_package_total(album_id) {
+    if (!is_package_download(album_id)) {
+        return;
+    }
+    let target_total = get_album_target_total(album_id);
+    let package_size = normalize_package_size(window['package_size' + album_id]);
+    let extra = parseInt(window['package_total_extra' + album_id], 10) || 0;
+    window['package_total' + album_id] = (target_total > 0 ? Math.ceil(target_total / package_size) : 0) + extra;
+}
+
+function get_package_progress(album_id) {
+    update_package_total(album_id);
+    let current_builder = get_current_package_builder(album_id);
+    if (current_builder && current_builder.scheduled > 0) {
+        window['package_current_index' + album_id] = current_builder.index;
+        window['package_current_done' + album_id] = current_builder.processed;
+        window['package_current_total' + album_id] = expected_package_item_count(album_id, current_builder);
+    }
+    let handled = (window['download_suc' + album_id] || 0) + (window['download_fail' + album_id] || 0);
+    let processed = Math.max(window['package_processed' + album_id] || 0, handled);
+    return {
+        enabled: is_package_download(album_id),
+        done: window['package_done' + album_id] || 0,
+        total: window['package_total' + album_id] || 0,
+        size: normalize_package_size(window['package_size' + album_id]),
+        processed: processed,
+        imageTotal: get_album_target_total(album_id),
+        currentIndex: window['package_current_index' + album_id] || 0,
+        currentDone: window['package_current_done' + album_id] || 0,
+        currentTotal: window['package_current_total' + album_id] || 0
+    };
+}
+
+function get_album_activity(album_id) {
+    return window['albumActivity' + album_id] || {
+        message: '等待后台任务',
+        phase: 'idle',
+        updated: 0
+    };
+}
+
+function set_album_activity(album_id, message, phase) {
+    if (!album_id) {
+        return;
+    }
+    window['albumActivity' + album_id] = {
+        message: message || '后台处理中',
+        phase: phase || 'running',
+        updated: (new Date()).getTime()
+    };
+}
+
+function emit_album_progress(album_id, info, finished) {
+    events.album_complete({
+        album_id: album_id,
+        uid: window['uid' + album_id],
+        suc: window['download_suc' + album_id] ? window['download_suc' + album_id] : 0,
+        fail: window['download_fail' + album_id] ? window['download_fail' + album_id] : 0,
+        total: get_album_total(album_id),
+        info: info,
+        finished: !!finished,
+        package_progress: get_package_progress(album_id),
+        activity: get_album_activity(album_id),
+        album_detail: window['albumDetail' + album_id]
+    });
+}
+
 function reset_album_info(album_id){
     window['download_finished' + album_id] = true;
     if (window['downloadSessions']) {
         delete window['downloadSessions'][album_id];
     }
-    events.album_complete({
-        album_id: album_id,
-        uid: window['uid' + album_id],
-        suc: window['download_suc' + album_id]?window['download_suc' + album_id]:0,
-        fail: window['download_fail' + album_id]?window['download_fail' + album_id]:0,
-        total: get_album_total(album_id),
-        info:'下载完成',
-        album_detail: window['albumDetail' + album_id]
-    });
+    let fail = window['download_fail' + album_id] ? window['download_fail' + album_id] : 0;
+    let suc = window['download_suc' + album_id] ? window['download_suc' + album_id] : 0;
+    let target = get_album_target_total(album_id) || get_album_total(album_id);
+    let has_error = fail > 0 || (target > 0 && suc + fail < target);
+    set_album_activity(album_id, has_error ? ('下载结束：成功 ' + suc + ' 张，失败 ' + fail + ' 张') : ('下载完成：成功 ' + suc + ' 张'), has_error ? 'error' : 'complete');
+    emit_album_progress(album_id, has_error ? '下载结束' : '下载完成', true);
     set_download_status(has_active_downloads() ? 'running' : 'complete');
     if (window['download_folder' + album_id] && window['open'+album_id]) {
         show_folder(window['download_folder' + album_id])
@@ -563,6 +818,15 @@ function reset_album_info(album_id){
         window['photo_list_temp' + album_id] = [];
         window['sinceid' + album_id] = null;
         window['photo_seen' + album_id] = null;
+        window['package_buffer' + album_id] = [];
+        window['package_index' + album_id] = 1;
+        window['package_done' + album_id] = 0;
+        window['package_total' + album_id] = 0;
+        window['package_total_extra' + album_id] = 0;
+        window['package_processed' + album_id] = 0;
+        window['package_current_index' + album_id] = 0;
+        window['package_current_done' + album_id] = 0;
+        window['package_current_total' + album_id] = 0;
         window['download_suc' + album_id] = -1;
         window['download_fail' + album_id] = -1
     },2000)
@@ -644,7 +908,275 @@ function build_download_filename(url, name, album_id) {
     return filename;
 }
 
+function normalize_package_size(value) {
+    let size = parseInt(value, 10);
+    if (!size || size < 1) {
+        return 500;
+    }
+    return Math.min(size, 500);
+}
+
+function is_package_download(album_id) {
+    return window['package_download' + album_id] === true || window['package_download' + album_id] == 1;
+}
+
+function enqueue_package_items(album_id, folder, info_list) {
+    if (!is_package_download(album_id)) {
+        return;
+    }
+    for (let i in info_list) {
+        let item = info_list[i];
+        enqueue_download_task({
+            type: 'zipItem',
+            data: {
+                album_id: album_id,
+                folder: folder,
+                item: {
+                    url: item.link,
+                    name: item.name
+                }
+            }
+        });
+    }
+}
+
+function flush_package_items(album_id, folder, limit) {
+    if (!is_package_download(album_id)) {
+        return;
+    }
+    let builders = get_package_builders(album_id);
+    for (let index in builders) {
+        let builder = builders[index];
+        if (builder && builder.scheduled > 0) {
+            builder.closed = true;
+            try_finalize_package_builder(album_id, builder);
+        }
+    }
+}
+
+function get_package_builders(album_id) {
+    let key = 'package_builders_' + album_id;
+    if (!window[key]) {
+        window[key] = {};
+    }
+    return window[key];
+}
+
+function create_package_builder(album_id, folder) {
+    let index_key = 'package_index' + album_id;
+    if (!window[index_key]) {
+        window[index_key] = 1;
+    }
+    let index = window[index_key]++;
+    let builder = {
+        album_id: album_id,
+        folder: folder,
+        index: index,
+        scheduled: 0,
+        processed: 0,
+        success: 0,
+        failed: 0,
+        files: [],
+        used_names: {},
+        closed: false,
+        finalized: false,
+        currentSize: 0
+    };
+    get_package_builders(album_id)[index] = builder;
+    window['package_open_builder_' + album_id] = index;
+    return builder;
+}
+
+function get_current_package_builder(album_id) {
+    let open_index = window['package_open_builder_' + album_id];
+    let builders = get_package_builders(album_id);
+    return open_index && builders[open_index] ? builders[open_index] : null;
+}
+
+function reserve_package_builder_slot(album_id, folder) {
+    let size = normalize_package_size(window['package_size' + album_id]);
+    let builder = get_current_package_builder(album_id);
+    if (!builder || builder.closed || builder.scheduled >= size || builder.currentSize >= MAX_PACKAGE_MEMORY_BYTES) {
+        if (builder && !builder.closed) {
+            builder.closed = true;
+            try_finalize_package_builder(album_id, builder);
+        }
+        builder = create_package_builder(album_id, folder);
+    }
+    builder.scheduled++;
+    if (builder.scheduled >= size) {
+        builder.closed = true;
+        window['package_open_builder_' + album_id] = null;
+    }
+    window['package_current_index' + album_id] = builder.index;
+    window['package_current_total' + album_id] = expected_package_item_count(album_id, builder);
+    return builder;
+}
+
+function expected_package_item_count(album_id, builder) {
+    let size = normalize_package_size(window['package_size' + album_id]);
+    let image_total = get_album_target_total(album_id);
+    if (image_total > 0 && builder && builder.index) {
+        return Math.max(0, Math.min(size, image_total - ((builder.index - 1) * size)));
+    }
+    return builder && builder.scheduled ? builder.scheduled : size;
+}
+
+function process_package_item(task, callback) {
+    let album_id = task.album_id;
+    if (!task.index && has_closed_package(album_id)) {
+        arrayQueue.push({type: 'zipItem', data: task});
+        typeof callback === 'function' && callback();
+        return;
+    }
+    let builders = get_package_builders(album_id);
+    let builder = task.index ? builders[task.index] : reserve_package_builder_slot(album_id, task.folder);
+    task.index = builder ? builder.index : task.index;
+    if (!builder || is_album_removed(album_id)) {
+        typeof callback === 'function' && callback();
+        return;
+    }
+    if (is_album_paused(album_id)) {
+        arrayQueue.unshift({type: 'zipItem', data: task});
+        typeof callback === 'function' && callback();
+        return;
+    }
+    if (has_earlier_unfinished_package(album_id, task.index)) {
+        arrayQueue.push({type: 'zipItem', data: task});
+        typeof callback === 'function' && callback();
+        return;
+    }
+    let startStamp = (new Date()).getTime();
+    window['downCurrent'] = window['downCurrent'] + 1;
+    window['package_current_index' + album_id] = builder.index;
+    window['package_current_done' + album_id] = builder.processed;
+    window['package_current_total' + album_id] = expected_package_item_count(album_id, builder);
+    set_album_activity(album_id, '正在抓取第 ' + builder.index + ' 包图片 ' + builder.processed + ' / ' + expected_package_item_count(album_id, builder), 'running');
+    emit_package_progress(album_id);
+    fetch_weibo_image_blob(task.item.url, album_id, task.item.name).then(function (blob) {
+        if (is_album_paused(album_id)) {
+            arrayQueue.unshift({type: 'zipItem', data: task});
+            return null;
+        }
+        if (is_album_removed(album_id)) {
+            return null;
+        }
+        return blob.arrayBuffer();
+    }).then(function (buffer) {
+        if (!buffer || is_album_paused_or_removed(album_id)) {
+            return;
+        }
+        let file = {
+            name: zip_entry_name(task.item.name, builder.processed + 1, builder.used_names),
+            bytes: new Uint8Array(buffer)
+        };
+        builder.files.push(file);
+        builder.currentSize += zip_file_estimated_size(file);
+        builder.success++;
+        builder.processed++;
+        record_package_item_processed(album_id, builder);
+        if (builder.currentSize >= MAX_PACKAGE_MEMORY_BYTES && !builder.closed) {
+            builder.closed = true;
+            window['package_open_builder_' + album_id] = null;
+            set_album_activity(album_id, '第 ' + builder.index + ' 包达到内存保护阈值，正在提前保存 ZIP', 'running');
+            emit_package_progress(album_id);
+        }
+        console.log('[download:zip:item:done]', {
+            album_id: album_id,
+            packageIndex: builder.index,
+            filename: task.item.name,
+            elapsed: (new Date()).getTime() - startStamp
+        });
+    }).catch(function (e) {
+        if (is_album_paused(album_id) && !is_album_removed(album_id)) {
+            arrayQueue.unshift({type: 'zipItem', data: task});
+            return;
+        }
+        if (is_album_removed(album_id)) {
+            return;
+        }
+        builder.failed++;
+        builder.processed++;
+        console.warn('[download:zip:item:error]', {
+            album_id: album_id,
+            url: task.item.url,
+            filename: task.item.name,
+            error: e && e.message ? e.message : e
+        });
+        record_package_item_processed(album_id, builder);
+    }).then(function () {
+        window['downCurrent'] = Math.max(0, window['downCurrent'] - 1);
+        try_finalize_package_builder(album_id, builder);
+        typeof callback === 'function' && callback();
+        scheduleQueueDrain();
+    });
+}
+
+function try_finalize_package_builder(album_id, builder) {
+    if (!builder || builder.finalized || is_album_paused_or_removed(album_id)) {
+        return;
+    }
+    if (!builder.closed || builder.processed < builder.scheduled) {
+        return;
+    }
+    builder.finalized = true;
+    enqueue_download_task({
+        type: 'zipSave',
+        data: {
+            album_id: album_id,
+            folder: builder.folder,
+            index: builder.index,
+            files: builder.files,
+            failed: builder.failed,
+            scheduled: builder.scheduled
+        }
+    }, true);
+}
+
+function has_earlier_unfinished_package(album_id, package_index) {
+    let builders = get_package_builders(album_id);
+    package_index = parseInt(package_index, 10) || 0;
+    for (let index in builders) {
+        index = parseInt(index, 10) || 0;
+        if (index > 0 && index < package_index && builders[index]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function has_closed_package(album_id) {
+    let builders = get_package_builders(album_id);
+    for (let index in builders) {
+        let builder = builders[index];
+        if (builder && builder.closed) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function cleanup_album_package_builders(album_id) {
+    let builders = get_package_builders(album_id);
+    for (let index in builders) {
+        if (builders[index]) {
+            builders[index].files = [];
+        }
+    }
+    window['package_builders_' + album_id] = {};
+    window['package_open_builder_' + album_id] = null;
+}
+
 function down(url, name, album_id, callback) {
+    if (is_album_removed(album_id)) {
+        typeof callback === 'function' && callback();
+        return;
+    }
+    if (is_album_paused(album_id)) {
+        arrayQueue.unshift({type: 'down', data: [url, name, album_id]});
+        typeof callback === 'function' && callback();
+        return;
+    }
     // console.log(url, name);
     name = build_download_filename(url, name, album_id);
     let startStamp = (new Date()).getTime();
@@ -675,10 +1207,12 @@ function is_weibo_image_url(url) {
     return /^https?:\/\/[^\/]*(sinaimg|sinajs)\.cn\//i.test(url);
 }
 
-function download_weibo_image(url, name, album_id, startStamp, callback) {
-    fetch(url, {
+function fetch_weibo_image_blob(url, album_id, filename) {
+    let controller = create_album_abort_controller(album_id);
+    return fetch(url, {
         method: 'GET',
         credentials: 'include',
+        signal: controller.signal,
         referrer: 'https://m.weibo.cn/',
         referrerPolicy: 'no-referrer-when-downgrade',
         headers: {
@@ -689,6 +1223,7 @@ function download_weibo_image(url, name, album_id, startStamp, callback) {
         console.log('[download:fetch]', {
             album_id: album_id,
             url: url,
+            filename: filename,
             status: res.status,
             content_type: content_type
         });
@@ -700,35 +1235,302 @@ function download_weibo_image(url, name, album_id, startStamp, callback) {
         }
         return res.blob();
     }).then(function (blob) {
-        return blob_to_data_url(blob);
-    }).then(function (data_url) {
-        let filename_token = queue_data_url_filename(name);
-        download_direct({
-            url: append_data_url_token(data_url, filename_token),
-            filename: name,
-            conflictAction: 'overwrite'
-        }, url, name, album_id, startStamp, callback);
+        release_album_abort_controller(album_id, controller);
+        return blob;
+    }).catch(function (e) {
+        release_album_abort_controller(album_id, controller);
+        throw e;
+    });
+}
+
+function download_weibo_image(url, name, album_id, startStamp, callback) {
+    set_album_activity(album_id, '正在下载图片：' + (name || basename_from_url(url)), 'running');
+    emit_album_progress(album_id);
+    fetch_weibo_image_blob(url, album_id, name).then(function (blob) {
+        if (is_album_paused(album_id) && !is_album_removed(album_id)) {
+            window['downCurrent'] =  window['downCurrent'] - 1;
+            arrayQueue.unshift({type: 'down', data: [url, name, album_id]});
+            typeof callback === 'function' && callback();
+            scheduleQueueDrain();
+            return;
+        }
+        if (is_album_removed(album_id)) {
+            window['downCurrent'] =  window['downCurrent'] - 1;
+            typeof callback === 'function' && callback();
+            scheduleQueueDrain();
+            return;
+        }
+        download_blob_direct(blob, url, name, album_id, startStamp, callback);
     }).catch(function (e) {
         window['downCurrent'] =  window['downCurrent'] - 1;
+        if (is_album_paused(album_id) && !is_album_removed(album_id)) {
+            arrayQueue.unshift({type: 'down', data: [url, name, album_id]});
+            typeof callback === 'function' && callback();
+            scheduleQueueDrain();
+            return;
+        }
+        if (is_album_removed(album_id)) {
+            typeof callback === 'function' && callback();
+            scheduleQueueDrain();
+            return;
+        }
+        set_album_activity(album_id, '图片下载失败：' + (e && e.message ? e.message : e), 'error');
         console.warn('[download:fetch:error]', {
             album_id: album_id,
             url: url,
             filename: name,
             error: e && e.message ? e.message : e
         });
-        if(window['download_suc' + album_id] > -1) {
-            window['download_fail' + album_id] = window['download_fail' + album_id] + 1;
-            events.album_complete({
-                album_id: album_id,
-                uid: window['uid' + album_id],
-                suc: window['download_suc' + album_id],
-                fail: window['download_fail' + album_id],
-                total: get_album_total(album_id),
-                album_detail: window['albumDetail' + album_id]
-            });
-        }
+        record_download_progress(album_id, 0, 1);
         typeof callback === 'function' && callback();
         scheduleQueueDrain();
+    });
+}
+
+// Do not register chrome.downloads.onDeterminingFilename here.
+// Even a narrow listener participates in Chrome's global filename arbitration and can conflict with sibling extensions.
+// Do not use data: URLs for large downloads either; Chrome may copy huge base64 strings into the main process and crash.
+
+let offscreenDocumentCreating = null;
+let offscreenUnavailableUntil = 0;
+let downloadBlobStoreName = 'blobs';
+let downloadDbName = 'octo_weibo_album_downloads';
+
+function open_download_db() {
+    return new Promise(function (resolve, reject) {
+        let request = indexedDB.open(downloadDbName, 1);
+        request.onupgradeneeded = function () {
+            let db = request.result;
+            if (!db.objectStoreNames.contains(downloadBlobStoreName)) {
+                db.createObjectStore(downloadBlobStoreName);
+            }
+        };
+        request.onsuccess = function () {
+            resolve(request.result);
+        };
+        request.onerror = function () {
+            reject(request.error || new Error('IndexedDB open failed'));
+        };
+    });
+}
+
+function idb_put_blob(key, blob) {
+    return open_download_db().then(function (db) {
+        return new Promise(function (resolve, reject) {
+            let tx = db.transaction(downloadBlobStoreName, 'readwrite');
+            let store = tx.objectStore(downloadBlobStoreName);
+            let request = store.put({blob: blob, time: (new Date()).getTime()}, key);
+            request.onsuccess = function () {
+                resolve(true);
+            };
+            request.onerror = function () {
+                reject(request.error || new Error('IndexedDB write failed'));
+            };
+            tx.oncomplete = function () {
+                db.close();
+            };
+        });
+    });
+}
+
+function idb_get_blob(key) {
+    return open_download_db().then(function (db) {
+        return new Promise(function (resolve, reject) {
+            let tx = db.transaction(downloadBlobStoreName, 'readonly');
+            let store = tx.objectStore(downloadBlobStoreName);
+            let request = store.get(key);
+            request.onsuccess = function () {
+                let item = request.result;
+                resolve(item && item.blob ? item.blob : null);
+            };
+            request.onerror = function () {
+                reject(request.error || new Error('IndexedDB read failed'));
+            };
+            tx.oncomplete = function () {
+                db.close();
+            };
+        });
+    });
+}
+
+function idb_delete_blob(key) {
+    return open_download_db().then(function (db) {
+        return new Promise(function (resolve, reject) {
+            let tx = db.transaction(downloadBlobStoreName, 'readwrite');
+            let store = tx.objectStore(downloadBlobStoreName);
+            let request = store.delete(key);
+            request.onsuccess = function () {
+                resolve(true);
+            };
+            request.onerror = function () {
+                reject(request.error || new Error('IndexedDB delete failed'));
+            };
+            tx.oncomplete = function () {
+                db.close();
+            };
+        });
+    }).catch(function () {
+        return false;
+    });
+}
+
+function create_download_blob_key(prefix) {
+    return (prefix || 'blob') + '_' + (new Date()).getTime() + '_' + Math.random().toString(36).slice(2);
+}
+
+function ensure_offscreen_document() {
+    if ((new Date()).getTime() < offscreenUnavailableUntil) {
+        return Promise.reject(new Error('Offscreen document is temporarily unavailable'));
+    }
+    if (!chrome.offscreen || !chrome.offscreen.createDocument) {
+        return Promise.reject(new Error('Chrome offscreen API unavailable'));
+    }
+    if (offscreenDocumentCreating) {
+        return offscreenDocumentCreating;
+    }
+    offscreenDocumentCreating = clients.matchAll({
+        includeUncontrolled: true,
+        type: 'window'
+    }).then(function (client_list) {
+        let offscreen_url = chrome.runtime.getURL('offscreen.html');
+        for (let i in client_list) {
+            if (client_list[i].url === offscreen_url) {
+                return true;
+            }
+        }
+        return chrome.offscreen.createDocument({
+            url: 'offscreen.html',
+            reasons: ['BLOBS'],
+            justification: 'Create short blob URLs for large Weibo image and ZIP downloads.'
+        });
+    }).then(function () {
+        return wait_for_offscreen_ready();
+    }).then(function () {
+        offscreenDocumentCreating = null;
+        return true;
+    }).catch(function (e) {
+        offscreenDocumentCreating = null;
+        offscreenUnavailableUntil = (new Date()).getTime() + 60 * 1000;
+        throw e;
+    });
+    return offscreenDocumentCreating;
+}
+
+function wait_for_offscreen_ready(tries) {
+    tries = tries === undefined ? 20 : tries;
+    return new Promise(function (resolve, reject) {
+        chrome.runtime.sendMessage({type: 'octo_offscreen_ping'}, function (res) {
+            if (res && res.ok) {
+                resolve(true);
+                return;
+            }
+            if (tries <= 0) {
+                reject(new Error(chrome.runtime.lastError ? chrome.runtime.lastError.message : 'Offscreen document is not ready'));
+                return;
+            }
+            setTimeout(function () {
+                wait_for_offscreen_ready(tries - 1).then(resolve).catch(reject);
+            }, 100);
+        });
+    });
+}
+
+function download_stored_blob_via_offscreen(key, filename, conflictAction) {
+    filename = normalize_download_filename(filename);
+    if (!filename) {
+        return Promise.reject(new Error('Download filename is empty'));
+    }
+    return ensure_offscreen_document().catch(function (e) {
+        console.warn('[download:blob:offscreen:error]', {
+            filename: filename,
+            error: e && e.message ? e.message : e
+        });
+        return false;
+    }).then(function (ready) {
+        if (!ready) {
+            return download_stored_blob_as_data_url(key, filename, conflictAction);
+        }
+        return new Promise(function (resolve, reject) {
+            chrome.runtime.sendMessage({
+                type: 'octo_prepare_blob_url',
+                key: key,
+                filename: filename
+            }, function (res) {
+                if (chrome.runtime.lastError) {
+                    offscreenUnavailableUntil = (new Date()).getTime() + 60 * 1000;
+                    console.warn('[download:blob:prepare:error]', {
+                        filename: filename,
+                        error: chrome.runtime.lastError.message
+                    });
+                    download_stored_blob_as_data_url(key, filename, conflictAction).then(resolve).catch(reject);
+                    return;
+                }
+                if (!res || !res.ok) {
+                    offscreenUnavailableUntil = (new Date()).getTime() + 60 * 1000;
+                    console.warn('[download:blob:prepare:error]', {
+                        filename: filename,
+                        error: res && res.error ? res.error : 'Download create failed'
+                    });
+                    download_stored_blob_as_data_url(key, filename, conflictAction).then(resolve).catch(reject);
+                    return;
+                }
+                chrome.downloads.download({
+                    url: res.url,
+                    filename: filename,
+                    conflictAction: conflictAction || 'overwrite'
+                }, function (download_id) {
+                    if (chrome.runtime.lastError || !download_id) {
+                        let error_message = chrome.runtime.lastError ? chrome.runtime.lastError.message : 'Download create failed';
+                        console.warn('[download:blob:url:error]', {
+                            filename: filename,
+                            error: error_message
+                        });
+                        release_offscreen_blob_url(res.url, null);
+                        download_stored_blob_as_data_url(key, filename, conflictAction).then(resolve).catch(reject);
+                        return;
+                    }
+                    register_offscreen_blob_download(download_id, res.url, key);
+                    resolve(download_id);
+                });
+            });
+        });
+    });
+}
+
+let offscreenBlobDownloads = {};
+
+function register_offscreen_blob_download(download_id, url, key) {
+    offscreenBlobDownloads[download_id] = {
+        url: url,
+        key: key,
+        time: (new Date()).getTime()
+    };
+    setTimeout(function () {
+        release_offscreen_blob_download(download_id);
+    }, 10 * 60 * 1000);
+}
+
+function release_offscreen_blob_download(download_id) {
+    let item = offscreenBlobDownloads[download_id];
+    if (!item || !item.url) {
+        return;
+    }
+    release_offscreen_blob_url(item.url, item.key);
+    delete offscreenBlobDownloads[download_id];
+}
+
+function release_offscreen_blob_url(url, key) {
+    if (!url) {
+        return;
+    }
+    chrome.runtime.sendMessage({
+        type: 'octo_release_blob_url',
+        url: url,
+        key: key
+    }, function () {
+        if (chrome.runtime.lastError) {
+            console.warn('[download:blob:release:error]', chrome.runtime.lastError.message);
+        }
     });
 }
 
@@ -738,96 +1540,680 @@ function blob_to_data_url(blob) {
         let binary = '';
         let chunk_size = 0x8000;
         for (let i = 0; i < bytes.length; i += chunk_size) {
-            let chunk = bytes.subarray(i, i + chunk_size);
-            binary += String.fromCharCode.apply(null, chunk);
+            binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk_size));
         }
         return 'data:' + (blob.type || 'application/octet-stream') + ';base64,' + btoa(binary);
     });
 }
 
-let pendingDataUrlFilenames = {};
-let dataUrlFilenameMarker = '#octo_weibo_album_filename=';
+function download_stored_blob_as_data_url(key, filename, conflictAction) {
+    return idb_get_blob(key).then(function (blob) {
+        if (!blob) {
+            throw new Error('Download blob missing for fallback');
+        }
+        if (blob.size > MAX_FALLBACK_DATA_URL_BYTES) {
+            throw new Error('Blob URL download failed and fallback is too large: ' + blob.size);
+        }
+        return blob_to_data_url(blob);
+    }).then(function (data_url) {
+        return new Promise(function (resolve, reject) {
+            chrome.downloads.download({
+                url: data_url,
+                filename: filename,
+                conflictAction: conflictAction || 'overwrite'
+            }, function (download_id) {
+                idb_delete_blob(key);
+                if (chrome.runtime.lastError || !download_id) {
+                    reject(new Error(chrome.runtime.lastError ? chrome.runtime.lastError.message : 'Fallback download create failed'));
+                    return;
+                }
+                resolve(download_id);
+            });
+        });
+    }).catch(function (e) {
+        idb_delete_blob(key);
+        throw e;
+    });
+}
 
-function queue_data_url_filename(filename) {
-    filename = normalize_download_filename(filename);
-    if (!filename) {
-        return '';
+function download_blob_via_offscreen(blob, filename, conflictAction) {
+    let key = create_download_blob_key('blob');
+    return idb_put_blob(key, blob).then(function () {
+        return download_stored_blob_via_offscreen(key, filename, conflictAction);
+    }).catch(function (e) {
+        idb_delete_blob(key);
+        throw e;
+    });
+}
+
+let crc32Table = null;
+let MAX_ZIP_BLOB_BYTES = 128 * 1024 * 1024;
+let MAX_PACKAGE_MEMORY_BYTES = 160 * 1024 * 1024;
+let MAX_FALLBACK_DATA_URL_BYTES = 10 * 1024 * 1024;
+
+function get_crc32_table() {
+    if (crc32Table) {
+        return crc32Table;
     }
-    let token = 'octo_weibo_album_' + (new Date()).getTime() + '_' + Math.random().toString(36).slice(2);
-    pendingDataUrlFilenames[token] = {
-        filename: filename,
-        time: (new Date()).getTime()
+    crc32Table = [];
+    for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) {
+            c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+        }
+        crc32Table[n] = c >>> 0;
+    }
+    return crc32Table;
+}
+
+function crc32(bytes) {
+    let table = get_crc32_table();
+    let crc = 0 ^ (-1);
+    for (let i = 0; i < bytes.length; i++) {
+        crc = (crc >>> 8) ^ table[(crc ^ bytes[i]) & 0xff];
+    }
+    return (crc ^ (-1)) >>> 0;
+}
+
+function zip_time_date(date) {
+    return {
+        time: ((date.getHours() & 0x1f) << 11) | ((date.getMinutes() & 0x3f) << 5) | ((Math.floor(date.getSeconds() / 2)) & 0x1f),
+        date: (((date.getFullYear() - 1980) & 0x7f) << 9) | (((date.getMonth() + 1) & 0x0f) << 5) | (date.getDate() & 0x1f)
     };
-    prune_data_url_filenames();
-    return token;
 }
 
-function append_data_url_token(data_url, token) {
-    if (!token) {
-        return data_url;
+function concat_uint8_arrays(chunks, total_length) {
+    let output = new Uint8Array(total_length);
+    let offset = 0;
+    for (let i in chunks) {
+        output.set(chunks[i], offset);
+        offset += chunks[i].length;
     }
-    return data_url + dataUrlFilenameMarker + encodeURIComponent(token);
+    return output;
 }
 
-function data_url_filename_token(url) {
-    let index = (url || '').lastIndexOf(dataUrlFilenameMarker);
-    if (index < 0) {
-        return '';
+function build_zip(files) {
+    let encoder = new TextEncoder();
+    let now = zip_time_date(new Date());
+    let local_chunks = [];
+    let central_chunks = [];
+    let offset = 0;
+    let total_length = 0;
+    let central_length = 0;
+
+    for (let i in files) {
+        let file = files[i];
+        let name_bytes = encoder.encode(file.name);
+        let data = file.bytes;
+        let crc = crc32(data);
+        let local = new Uint8Array(30 + name_bytes.length);
+        let local_view = new DataView(local.buffer);
+        local_view.setUint32(0, 0x04034b50, true);
+        local_view.setUint16(4, 20, true);
+        local_view.setUint16(6, 0x0800, true);
+        local_view.setUint16(8, 0, true);
+        local_view.setUint16(10, now.time, true);
+        local_view.setUint16(12, now.date, true);
+        local_view.setUint32(14, crc, true);
+        local_view.setUint32(18, data.length, true);
+        local_view.setUint32(22, data.length, true);
+        local_view.setUint16(26, name_bytes.length, true);
+        local_view.setUint16(28, 0, true);
+        local.set(name_bytes, 30);
+        local_chunks.push(local, data);
+        total_length += local.length + data.length;
+
+        let central = new Uint8Array(46 + name_bytes.length);
+        let central_view = new DataView(central.buffer);
+        central_view.setUint32(0, 0x02014b50, true);
+        central_view.setUint16(4, 20, true);
+        central_view.setUint16(6, 20, true);
+        central_view.setUint16(8, 0x0800, true);
+        central_view.setUint16(10, 0, true);
+        central_view.setUint16(12, now.time, true);
+        central_view.setUint16(14, now.date, true);
+        central_view.setUint32(16, crc, true);
+        central_view.setUint32(20, data.length, true);
+        central_view.setUint32(24, data.length, true);
+        central_view.setUint16(28, name_bytes.length, true);
+        central_view.setUint16(30, 0, true);
+        central_view.setUint16(32, 0, true);
+        central_view.setUint16(34, 0, true);
+        central_view.setUint16(36, 0, true);
+        central_view.setUint32(38, 0, true);
+        central_view.setUint32(42, offset, true);
+        central.set(name_bytes, 46);
+        central_chunks.push(central);
+        central_length += central.length;
+        offset += local.length + data.length;
     }
-    try {
-        return decodeURIComponent(url.substring(index + dataUrlFilenameMarker.length));
-    } catch (e) {
-        return '';
-    }
+
+    let end = new Uint8Array(22);
+    let end_view = new DataView(end.buffer);
+    end_view.setUint32(0, 0x06054b50, true);
+    end_view.setUint16(4, 0, true);
+    end_view.setUint16(6, 0, true);
+    end_view.setUint16(8, files.length, true);
+    end_view.setUint16(10, files.length, true);
+    end_view.setUint32(12, central_length, true);
+    end_view.setUint32(16, total_length, true);
+    end_view.setUint16(20, 0, true);
+
+    return concat_uint8_arrays(local_chunks.concat(central_chunks, [end]), total_length + central_length + end.length);
 }
 
-function take_data_url_filename(item) {
-    let token = data_url_filename_token(item && item.url);
-    let pending = token ? pendingDataUrlFilenames[token] : null;
-    if (pending) {
-        delete pendingDataUrlFilenames[token];
+function zip_entry_name(name, fallback_index, used) {
+    let cleaned = reg_filename((name || '').toString());
+    if (!cleaned) {
+        cleaned = 'image_' + pad_number(fallback_index, 4) + '.jpg';
     }
-    return pending;
+    let dot = cleaned.lastIndexOf('.');
+    let base = dot > 0 ? cleaned.substring(0, dot) : cleaned;
+    let suffix = dot > 0 ? cleaned.substring(dot) : '';
+    let candidate = cleaned;
+    let duplicate = 2;
+    while (used[candidate]) {
+        candidate = base + '_' + duplicate + suffix;
+        duplicate++;
+    }
+    used[candidate] = true;
+    return candidate;
 }
 
-function prune_data_url_filenames() {
-    let now = (new Date()).getTime();
-    let tokens = Object.keys(pendingDataUrlFilenames);
-    for (let i in tokens) {
-        let token = tokens[i];
-        if (!pendingDataUrlFilenames[token] || now - pendingDataUrlFilenames[token].time > 10 * 60 * 1000) {
-            delete pendingDataUrlFilenames[token];
+function pad_number(num, length) {
+    num = parseInt(num, 10) || 0;
+    let str = num.toString();
+    while (str.length < length) {
+        str = '0' + str;
+    }
+    return str;
+}
+
+function package_base_filename(album_id, folder) {
+    let detail = window['albumDetail' + album_id] || {};
+    let base = reg_filename(clean_user_name(detail.name) || '');
+    if (!base) {
+        base = reg_filename(clean_user_name((folder || '').toString().split('_')[0] || '') || '');
+    }
+    if (!base) {
+        base = reg_filename((window['uid' + album_id] || album_id || 'package').toString()) || 'package';
+    }
+    return base;
+}
+
+function package_filename(folder, index, album_id, part, part_total) {
+    let name = package_base_filename(album_id, folder) + '_' + pad_number(index, 3);
+    if (part_total && part_total > 1) {
+        name += '_' + pad_number(part, 2);
+    }
+    name += '.zip';
+    return normalize_download_filename(base_folder + '/' + folder + '/' + name);
+}
+
+function zip_file_estimated_size(file) {
+    let name = file && file.name ? file.name.toString() : '';
+    let bytes = file && file.bytes ? file.bytes.length : 0;
+    return bytes + name.length * 4 + 128;
+}
+
+function store_zip_download_part(files) {
+    let zip_bytes = build_zip(files);
+    let blob = new Blob([zip_bytes], {type: 'application/zip'});
+    let key = create_download_blob_key('zip');
+    return idb_put_blob(key, blob).then(function () {
+        return {
+            key: key,
+            count: files.length,
+            bytes: zip_bytes.length
+        };
+    });
+}
+
+function name_zip_download_parts(parts, folder, index, album_id) {
+    for (let i in parts) {
+        parts[i].filename = package_filename(folder, index, album_id, parseInt(i, 10) + 1, parts.length);
+    }
+    return parts;
+}
+
+function cleanup_zip_download_parts(parts) {
+    for (let i in (parts || [])) {
+        if (parts[i] && parts[i].key) {
+            idb_delete_blob(parts[i].key);
         }
     }
 }
 
-chrome.downloads.onDeterminingFilename.addListener(function (item, suggest) {
-    if (!item || !item.url || item.url.indexOf('data:image/') !== 0 || !data_url_filename_token(item.url)) {
-        return;
+function add_package_total(album_id, extra) {
+    extra = parseInt(extra, 10) || 0;
+    if (extra > 0) {
+        window['package_total_extra' + album_id] = (window['package_total_extra' + album_id] || 0) + extra;
+        window['package_total' + album_id] = (window['package_total' + album_id] || 0) + extra;
     }
-    let pending = take_data_url_filename(item);
-    let filename = pending && pending.filename ? normalize_download_filename(pending.filename) : '';
-    if (!filename) {
-        console.warn('[download:filename:missing]', {
-            downloadId: item.id,
-            originalFilename: item.filename,
-            hasToken: !!data_url_filename_token(item.url),
-            pendingCount: Object.keys(pendingDataUrlFilenames).length
-        });
-        return;
-    }
-    console.log('[download:filename:suggest]', {
-        downloadId: item.id,
-        originalFilename: item.filename,
-        suggestedFilename: filename
-    });
-    suggest({filename: filename, conflictAction: 'overwrite'});
-    return true;
-});
+}
 
-function download_direct(download_options, url, name, album_id, startStamp, callback) {
+function download_zip_package(pack, callback) {
+    let album_id = pack.album_id;
+    let startStamp = (new Date()).getTime();
+    window['downCurrent'] =  window['downCurrent'] + 1;
+    window['package_current_index' + album_id] = pack.index;
+    window['package_current_done' + album_id] = 0;
+    window['package_current_total' + album_id] = pack.items.length;
+    set_album_activity(album_id, '正在抓取第 ' + pack.index + ' 包图片 0 / ' + pack.items.length, 'running');
+    emit_package_progress(album_id);
+    let current_files = [];
+    let current_size = 0;
+    let download_parts = [];
+    let used_names = {};
+    let fail_count = 0;
+    let success_count = 0;
+    let zip_name = package_filename(pack.folder, pack.index, album_id);
+    function flush_current_part() {
+        if (current_files.length === 0) {
+            return Promise.resolve();
+        }
+        let files_to_store = current_files;
+        current_files = [];
+        current_size = 0;
+        set_album_activity(album_id, '正在生成第 ' + pack.index + ' 包的第 ' + (download_parts.length + 1) + ' 个 ZIP（' + files_to_store.length + ' 张）', 'running');
+        emit_album_progress(album_id);
+        return store_zip_download_part(files_to_store).then(function (part) {
+            download_parts.push(part);
+        });
+    }
+    let chain = Promise.resolve();
+    for (let i in pack.items) {
+        (function (item, index) {
+            chain = chain.then(function () {
+                return fetch_weibo_image_blob(item.url, album_id, item.name).then(function (blob) {
+                    return blob.arrayBuffer();
+                }).then(function (buffer) {
+                    let file = {
+                        name: zip_entry_name(item.name, parseInt(index, 10) + 1, used_names),
+                        bytes: new Uint8Array(buffer)
+                    };
+                    let estimated_size = zip_file_estimated_size(file);
+                    let should_flush = current_files.length > 0 && current_size + estimated_size > MAX_ZIP_BLOB_BYTES;
+                    let add_file = function () {
+                        current_files.push(file);
+                        current_size += estimated_size;
+                        success_count++;
+                        record_package_item_processed(album_id);
+                    };
+                    if (should_flush) {
+                        return flush_current_part().then(add_file);
+                    }
+                    add_file();
+                    return true;
+                }).catch(function (e) {
+                    fail_count++;
+                    console.warn('[download:zip:item:error]', {
+                        album_id: album_id,
+                        url: item.url,
+                        filename: item.name,
+                        error: e && e.message ? e.message : e
+                    });
+                    record_package_item_processed(album_id);
+                });
+            });
+        })(pack.items[i], i);
+    }
+    chain.then(function () {
+        return flush_current_part();
+    }).then(function () {
+        if (download_parts.length === 0) {
+            window['downCurrent'] =  window['downCurrent'] - 1;
+            clear_package_current(album_id);
+            record_download_progress(album_id, 0, fail_count || pack.items.length);
+            typeof callback === 'function' && callback();
+            scheduleQueueDrain();
+            return;
+        }
+        name_zip_download_parts(download_parts, pack.folder, pack.index, album_id);
+        if (download_parts.length > 1) {
+            add_package_total(album_id, download_parts.length - 1);
+            set_album_activity(album_id, '第 ' + pack.index + ' 包较大，已自动拆成 ' + download_parts.length + ' 个 ZIP', 'running');
+            emit_album_progress(album_id);
+        }
+        console.log('[download:zip:start]', {
+            album_id: album_id,
+            filename: zip_name,
+            files: success_count,
+            failed: fail_count,
+            parts: download_parts.length
+        });
+        download_zip_parts(album_id, pack, download_parts, fail_count, startStamp, callback);
+    }).catch(function (e) {
+        window['downCurrent'] =  window['downCurrent'] - 1;
+        clear_package_current(album_id);
+        cleanup_zip_download_parts(download_parts);
+        set_album_activity(album_id, 'ZIP 生成失败：' + (e && e.message ? e.message : e), 'error');
+        console.warn('[download:zip:error]', {
+            album_id: album_id,
+            filename: zip_name,
+            error: e && e.message ? e.message : e
+        });
+        record_download_progress(album_id, 0, pack.items.length);
+        typeof callback === 'function' && callback();
+        scheduleQueueDrain();
+    });
+}
+
+function download_finalized_zip_package(pack, callback) {
+    let album_id = pack.album_id;
+    if (is_album_removed(album_id)) {
+        typeof callback === 'function' && callback();
+        return;
+    }
+    if (is_album_paused(album_id)) {
+        arrayQueue.unshift({type: 'zipSave', data: pack});
+        typeof callback === 'function' && callback();
+        return;
+    }
+    let startStamp = (new Date()).getTime();
+    window['downCurrent'] = window['downCurrent'] + 1;
+    set_album_activity(album_id, '正在生成第 ' + pack.index + ' 包 ZIP（' + pack.files.length + ' 张）', 'running');
+    emit_album_progress(album_id);
+    create_zip_download_parts_from_files(album_id, pack).then(function (download_parts) {
+        if (is_album_paused(album_id)) {
+            cleanup_zip_download_parts(download_parts);
+            arrayQueue.unshift({type: 'zipSave', data: pack});
+            window['downCurrent'] = Math.max(0, window['downCurrent'] - 1);
+            typeof callback === 'function' && callback();
+            scheduleQueueDrain();
+            return null;
+        }
+        if (is_album_removed(album_id)) {
+            cleanup_zip_download_parts(download_parts);
+            window['downCurrent'] = Math.max(0, window['downCurrent'] - 1);
+            typeof callback === 'function' && callback();
+            scheduleQueueDrain();
+            return null;
+        }
+        if (download_parts.length === 0) {
+            window['downCurrent'] = Math.max(0, window['downCurrent'] - 1);
+            clear_package_current(album_id);
+            record_package_done(album_id, 1);
+            record_download_progress(album_id, 0, pack.failed || pack.scheduled || 0);
+            delete_package_builder(album_id, pack.index);
+            typeof callback === 'function' && callback();
+            scheduleQueueDrain();
+            return null;
+        }
+        name_zip_download_parts(download_parts, pack.folder, pack.index, album_id);
+        if (download_parts.length > 1) {
+            add_package_total(album_id, download_parts.length - 1);
+            set_album_activity(album_id, '第 ' + pack.index + ' 包过大，已保护性拆成 ' + download_parts.length + ' 个 ZIP', 'running');
+            emit_album_progress(album_id);
+        }
+        console.log('[download:zip:start]', {
+            album_id: album_id,
+            files: pack.files.length,
+            failed: pack.failed,
+            parts: download_parts.length
+        });
+        download_zip_parts(album_id, pack, download_parts, pack.failed || 0, startStamp, function () {
+            delete_package_builder(album_id, pack.index);
+            typeof callback === 'function' && callback();
+        });
+        return true;
+    }).catch(function (e) {
+        window['downCurrent'] = Math.max(0, window['downCurrent'] - 1);
+        clear_package_current(album_id);
+        set_album_activity(album_id, 'ZIP 生成失败：' + (e && e.message ? e.message : e), 'error');
+        console.warn('[download:zip:error]', {
+            album_id: album_id,
+            index: pack.index,
+            error: e && e.message ? e.message : e
+        });
+        record_package_done(album_id, 1);
+        record_download_progress(album_id, 0, pack.scheduled || pack.files.length || 0);
+        delete_package_builder(album_id, pack.index);
+        typeof callback === 'function' && callback();
+        scheduleQueueDrain();
+    });
+}
+
+function create_zip_download_parts_from_files(album_id, pack) {
+    let parts = [];
+    let current_files = [];
+    let current_size = 0;
+    let chain = Promise.resolve();
+    function flush_part() {
+        if (current_files.length === 0) {
+            return Promise.resolve();
+        }
+        let files_to_store = current_files;
+        current_files = [];
+        current_size = 0;
+        set_album_activity(album_id, '正在写入第 ' + pack.index + ' 包的第 ' + (parts.length + 1) + ' 个 ZIP（' + files_to_store.length + ' 张）', 'running');
+        emit_album_progress(album_id);
+        return store_zip_download_part(files_to_store).then(function (part) {
+            parts.push(part);
+        });
+    }
+    for (let i in pack.files) {
+        let file = pack.files[i];
+        let estimated_size = zip_file_estimated_size(file);
+        if (current_files.length > 0 && current_size + estimated_size > MAX_ZIP_BLOB_BYTES) {
+            chain = chain.then(flush_part);
+        }
+        chain = chain.then(function () {
+            if (is_album_paused_or_removed(album_id)) {
+                return true;
+            }
+            current_files.push(file);
+            current_size += estimated_size;
+            return true;
+        });
+    }
+    return chain.then(flush_part).then(function () {
+        return parts;
+    });
+}
+
+function delete_package_builder(album_id, index) {
+    let builders = get_package_builders(album_id);
+    if (builders[index]) {
+        builders[index].files = [];
+        delete builders[index];
+    }
+}
+
+function download_zip_parts(album_id, pack, parts, fail_count, startStamp, callback) {
+    let index = 0;
+    function next() {
+        if (is_album_paused(album_id) && !is_album_removed(album_id)) {
+            cleanup_zip_download_parts(parts.slice(index));
+            arrayQueue.unshift({type: 'zipSave', data: pack});
+            window['downCurrent'] = Math.max(0, window['downCurrent'] - 1);
+            scheduleQueueDrain();
+            return;
+        }
+        if (is_album_removed(album_id)) {
+            cleanup_zip_download_parts(parts.slice(index));
+            window['downCurrent'] = Math.max(0, window['downCurrent'] - 1);
+            typeof callback === 'function' && callback();
+            scheduleQueueDrain();
+            return;
+        }
+        if (index >= parts.length) {
+            window['downCurrent'] =  window['downCurrent'] - 1;
+            clear_package_current(album_id);
+            typeof callback === 'function' && callback();
+            scheduleQueueDrain();
+            return;
+        }
+        let part = parts[index];
+        index++;
+        set_album_activity(album_id, '正在保存 ZIP ' + index + ' / ' + parts.length + '：' + part.filename, 'running');
+        emit_album_progress(album_id);
+        download_stored_blob_via_offscreen(part.key, part.filename, 'overwrite').then(function (download_id) {
+            if (is_album_paused(album_id) && !is_album_removed(album_id)) {
+                cancel_chrome_download(download_id);
+                cleanup_zip_download_parts(parts.slice(index));
+                arrayQueue.unshift({type: 'zipSave', data: pack});
+                window['downCurrent'] = Math.max(0, window['downCurrent'] - 1);
+                scheduleQueueDrain();
+                return;
+            }
+            if (is_album_removed(album_id)) {
+                cancel_chrome_download(download_id);
+                cleanup_zip_download_parts(parts.slice(index));
+                window['downCurrent'] = Math.max(0, window['downCurrent'] - 1);
+                typeof callback === 'function' && callback();
+                scheduleQueueDrain();
+                return;
+            }
+            let final_fail = index === parts.length ? fail_count : 0;
+            console.log('[download:zip:created]', {
+                album_id: album_id,
+                downloadId: download_id,
+                filename: part.filename,
+                files: part.count,
+                bytes: part.bytes,
+                elapsed: (new Date()).getTime() - startStamp
+            });
+            record_package_done(album_id, 1);
+            record_download_progress(album_id, part.count, final_fail);
+            next();
+        }).catch(function (e) {
+            let final_fail = index === parts.length ? fail_count : 0;
+            set_album_activity(album_id, 'ZIP 保存失败：' + (e && e.message ? e.message : e), 'error');
+            console.warn('[download:zip:download:error]', {
+                album_id: album_id,
+                filename: part.filename,
+                error: e && e.message ? e.message : e
+            });
+            record_download_progress(album_id, 0, part.count + final_fail);
+            next();
+        });
+    }
+    next();
+}
+
+function cancel_chrome_download(download_id) {
+    if (!download_id || !chrome.downloads || !chrome.downloads.cancel) {
+        return;
+    }
+    chrome.downloads.cancel(download_id, function () {
+        if (chrome.runtime.lastError) {
+            console.warn('[download:cancel:error]', {
+                downloadId: download_id,
+                error: chrome.runtime.lastError.message
+            });
+        }
+    });
+}
+
+function record_download_progress(album_id, suc_delta, fail_delta) {
+    if(window['download_suc' + album_id] > -1) {
+        window['download_suc' + album_id] = window['download_suc' + album_id] + (parseInt(suc_delta, 10) || 0);
+        window['download_fail' + album_id] = window['download_fail' + album_id] + (parseInt(fail_delta, 10) || 0);
+        emit_album_progress(album_id);
+    }
+}
+
+function record_package_done(album_id, count) {
+    if (!is_package_download(album_id)) {
+        return;
+    }
+    window['package_done' + album_id] = (window['package_done' + album_id] || 0) + (parseInt(count, 10) || 0);
+    clear_package_current(album_id);
+}
+
+function record_package_item_processed(album_id, builder) {
+    if (!is_package_download(album_id)) {
+        return;
+    }
+    window['package_processed' + album_id] = (window['package_processed' + album_id] || 0) + 1;
+    if (builder) {
+        window['package_current_index' + album_id] = builder.index;
+        window['package_current_done' + album_id] = builder.processed;
+        window['package_current_total' + album_id] = expected_package_item_count(album_id, builder);
+    } else {
+        window['package_current_done' + album_id] = (window['package_current_done' + album_id] || 0) + 1;
+    }
+    set_album_activity(
+        album_id,
+        '正在抓取第 ' + (window['package_current_index' + album_id] || 0) + ' 包图片 ' + (window['package_current_done' + album_id] || 0) + ' / ' + (window['package_current_total' + album_id] || 0),
+        'running'
+    );
+    emit_package_progress(album_id);
+}
+
+function clear_package_current(album_id) {
+    window['package_current_index' + album_id] = 0;
+    window['package_current_done' + album_id] = 0;
+    window['package_current_total' + album_id] = 0;
+}
+
+function emit_package_progress(album_id) {
+    if (!is_package_download(album_id) || window['download_suc' + album_id] < 0) {
+        return;
+    }
+    emit_album_progress(album_id);
+}
+
+function download_blob_direct(blob, url, name, album_id, startStamp, callback, progress) {
+    download_blob_via_offscreen(blob, name, 'overwrite').then(function (download_id) {
+        window['downCurrent'] =  window['downCurrent'] - 1;
+        if (is_album_removed(album_id)) {
+            typeof callback === 'function' && callback();
+            scheduleQueueDrain();
+            return;
+        }
+        console.log('[download:created]', {
+            album_id: album_id,
+            downloadId: download_id,
+            url: url,
+            filename: name,
+            elapsed: (new Date()).getTime() - startStamp,
+            via: 'blob'
+        });
+        if (!window['download_folder' + album_id]) {
+            window['download_folder' + album_id] = download_id ? download_id : null;
+        }
+        let success_delta = progress && progress.success !== undefined ? progress.success : 1;
+        let fail_delta = progress && progress.fail !== undefined ? progress.fail : 0;
+        if (progress && progress.package) {
+            record_package_done(album_id, progress.package);
+        }
+        record_download_progress(album_id, success_delta, fail_delta);
+        typeof callback === 'function' && callback();
+        scheduleQueueDrain();
+    }).catch(function (e) {
+        window['downCurrent'] =  window['downCurrent'] - 1;
+        if (is_album_removed(album_id)) {
+            typeof callback === 'function' && callback();
+            scheduleQueueDrain();
+            return;
+        }
+        console.warn('[download:error]', {
+            album_id: album_id,
+            url: url,
+            filename: name,
+            error: e && e.message ? e.message : e,
+            via: 'blob'
+        });
+        if (progress && progress.package) {
+            clear_package_current(album_id);
+        }
+        let failure_delta = progress && progress.failure !== undefined ? progress.failure : 1;
+        record_download_progress(album_id, 0, failure_delta);
+        typeof callback === 'function' && callback();
+        scheduleQueueDrain();
+    });
+}
+
+function download_direct(download_options, url, name, album_id, startStamp, callback, progress) {
     chrome.downloads.download(download_options, function (res) {
         window['downCurrent'] =  window['downCurrent'] - 1;
+        if (is_album_removed(album_id)) {
+            typeof callback === 'function' && callback();
+            scheduleQueueDrain();
+            return;
+        }
         // if (!window['downTime' + album_id]) {
         //     window['downTime' + album_id] = []
         // }
@@ -868,20 +2254,19 @@ function download_direct(download_options, url, name, album_id, startStamp, call
         if (!window['download_folder' + album_id]) {
             window['download_folder' + album_id] = res ? res : null;
         }
-        if(window['download_suc' + album_id] > -1) {
-            if (res && !chrome.runtime.lastError) {
-                window['download_suc' + album_id] = window['download_suc' + album_id] + 1;
-            } else {
-                window['download_fail' + album_id] = window['download_fail' + album_id] + 1;
+        let success_delta = progress && progress.success !== undefined ? progress.success : 1;
+        let fail_delta = progress && progress.fail !== undefined ? progress.fail : 0;
+        let failure_delta = progress && progress.failure !== undefined ? progress.failure : 1;
+        if (res && !chrome.runtime.lastError) {
+            if (progress && progress.package) {
+                record_package_done(album_id, progress.package);
             }
-            events.album_complete({
-                album_id: album_id,
-                uid: window['uid' + album_id],
-                suc: window['download_suc' + album_id],
-                fail: window['download_fail' + album_id],
-                total: get_album_total(album_id),
-                album_detail: window['albumDetail' + album_id]
-            });
+            record_download_progress(album_id, success_delta, fail_delta);
+        } else {
+            if (progress && progress.package) {
+                clear_package_current(album_id);
+            }
+            record_download_progress(album_id, 0, failure_delta);
         }
         typeof callback === 'function' && callback();
         scheduleQueueDrain();
@@ -896,10 +2281,14 @@ chrome.downloads.onChanged.addListener(function (delta) {
         });
     }
     if (delta.state) {
+        let state = delta.state.current || delta.state.previous;
         console.log('[download:onChanged:state]', {
             downloadId: delta.id,
-            state: delta.state.current || delta.state.previous
+            state: state
         });
+        if (state === 'complete' || state === 'interrupted') {
+            release_offscreen_blob_download(delta.id);
+        }
     }
     if (delta.filename) {
         let filename = delta.filename.current || delta.filename.previous;
@@ -921,6 +2310,10 @@ function ArrayQueue(){
     //入队操作
     this.push = function(element){
         arr.push(element);
+        return true;
+    };
+    this.unshift = function(element){
+        arr.unshift(element);
         return true;
     };
     //出队操作
@@ -950,13 +2343,31 @@ download_status = 'idle';
 downloadSessions = {};
 window['queueDrainTimer'] = null;
 config_get('down_allow', function (value) {
-    down_allow = value !== null ? value : 1;
+    down_allow = value !== undefined && value !== null ? value : 1;
     config_set({'down_allow':down_allow});
 });
+config_get('package_download', function (value) {
+    if (value === undefined || value === null) {
+        config_set({'package_download': 0});
+    }
+});
+config_get('package_size_migrated_500', function (migrated) {
+    config_get('package_size', function (value) {
+        let size = normalize_package_size(value);
+        if (!migrated && (value === undefined || value === null || parseInt(value, 10) === 50)) {
+            size = 500;
+        }
+        config_set({'package_size': size, 'package_size_migrated_500': 1});
+    });
+});
 
-function enqueue_download_task(task) {
-    arrayQueue.push(task);
-    if (task && task.type === 'down' && !window['down_stopped']) {
+function enqueue_download_task(task, priority) {
+    if (priority) {
+        arrayQueue.unshift(task);
+    } else {
+        arrayQueue.push(task);
+    }
+    if (task && (task.type === 'down' || task.type === 'zip' || task.type === 'zipItem' || task.type === 'zipSave') && !window['down_stopped']) {
         set_download_status('running');
     }
     scheduleQueueDrain();
@@ -968,6 +2379,15 @@ function clear_album_queue_tasks(album_id) {
     for (let i in list) {
         let task = list[i];
         if (task.type === 'down' && task.data && task.data[2] == album_id) {
+            continue;
+        }
+        if (task.type === 'zip' && task.data && task.data.album_id == album_id) {
+            continue;
+        }
+        if (task.type === 'zipItem' && task.data && task.data.album_id == album_id) {
+            continue;
+        }
+        if (task.type === 'zipSave' && task.data && task.data.album_id == album_id) {
             continue;
         }
         if (task.type === 'finish' && task.data == album_id) {
@@ -1032,17 +2452,49 @@ function drainQueue() {
         return;
     }
     let started = 0;
-    while (window['downCurrent'] < window['down_allow'] && arrayQueue.length() > 0) {
+    let waiting_for_active = false;
+    let skipped = 0;
+    let initial_length = arrayQueue.length();
+    while (window['downCurrent'] < window['down_allow'] && arrayQueue.length() > 0 && skipped < initial_length) {
         let queue = arrayQueue.pop();
         if (!queue) {
             break;
         }
+        let album_id = task_album_id(queue);
+        if (album_id && is_album_removed(album_id)) {
+            continue;
+        }
+        if (album_id && is_album_paused(album_id)) {
+            arrayQueue.push(queue);
+            skipped++;
+            continue;
+        }
         if(queue.type === 'down'){
             started++;
             down(...queue.data);
-        }else if(queue.type === 'finish'){
-            if (window['downCurrent'] > 0 || arrayQueue.length() > 0) {
+        }else if(queue.type === 'zip'){
+            started++;
+            download_zip_package(queue.data);
+        }else if(queue.type === 'zipItem'){
+            if (queue.data && queue.data.index && has_earlier_unfinished_package(queue.data.album_id, queue.data.index)) {
                 arrayQueue.push(queue);
+                skipped++;
+                continue;
+            }
+            if (queue.data && !queue.data.index && has_closed_package(queue.data.album_id)) {
+                arrayQueue.push(queue);
+                skipped++;
+                continue;
+            }
+            started++;
+            process_package_item(queue.data);
+        }else if(queue.type === 'zipSave'){
+            started++;
+            download_finalized_zip_package(queue.data);
+        }else if(queue.type === 'finish'){
+            if (window['downCurrent'] > 0 || arrayQueue.length() > 0 || has_unfinished_package_builders(queue.data)) {
+                arrayQueue.push(queue);
+                waiting_for_active = true;
                 break;
             }
             reset_album_info(queue.data);
@@ -1056,9 +2508,39 @@ function drainQueue() {
             down_allow: window['down_allow']
         });
     }
-    if (arrayQueue.length() > 0 && window['downCurrent'] < window['down_allow']) {
+    if (!waiting_for_active && arrayQueue.length() > 0 && window['downCurrent'] < window['down_allow'] && !(started === 0 && skipped > 0)) {
         scheduleQueueDrain();
     }
+}
+
+function has_unfinished_package_builders(album_id) {
+    if (!is_package_download(album_id)) {
+        return false;
+    }
+    let builders = get_package_builders(album_id);
+    for (let index in builders) {
+        let builder = builders[index];
+        if (builder && builder.scheduled > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function task_album_id(task) {
+    if (!task) {
+        return null;
+    }
+    if (task.type === 'down' && task.data) {
+        return task.data[2];
+    }
+    if ((task.type === 'zip' || task.type === 'zipItem' || task.type === 'zipSave') && task.data) {
+        return task.data.album_id;
+    }
+    if (task.type === 'finish') {
+        return task.data;
+    }
+    return null;
 }
 
 function register_download_session(uid, album_id, type, folder) {
