@@ -119,12 +119,37 @@ utils/                 公共工具和配置
 
 ## 版本
 
-当前 manifest 版本：`0.3.14`
+当前 manifest 版本：`0.3.18`
+
+### 0.3.18
+
+- 修复 ZIP 保存失败后把整包 500 张全部计入失败的问题：ZIP 保存失败会重试，连续失败后暂停并保留当前包，不再继续抓下一包。
+- offscreen 页面只负责创建短 `blob:` URL，真正保存仍由 background 调用 `chrome.downloads.download({ filename })`，保证 `WeiboAlbum/用户名/用户名_001.zip` 路径由 Chrome downloads API 处理。
+- 移除 offscreen 直接调用 `chrome.downloads` 的路径，避免 offscreen 能力受限导致 ZIP 全部保存失败。
+
+### 0.3.17
+
+- 修复 ZIP 保存时 offscreen 页面未及时 ready 导致失败的问题：不再对大 ZIP 直接回退 data URL，而是等待并重试 offscreen Blob 下载。
+- 看到 `Offscreen document is not ready` 后接 `fallback is too large` 时，说明失败发生在 ZIP 保存桥，不是图片抓取阶段。
+
+### 0.3.16
+
+- ZIP Blob 下载链路曾尝试由 offscreen 页面直接调用 `chrome.downloads.download({ filename })`，后来在 `0.3.18` 改回 background 执行保存，offscreen 只负责创建短 `blob:` URL。
+- 打包图片先暂存 IndexedDB，ZIP 构建时用 Blob parts 组合，避免为了控制内存把 500 张包截成一百多张。
+- 打包失败项会写入 `download_failures.txt` 并随当前 ZIP 一起保存，便于追查 HTTP 403、HTML 响应、网络中断等失败原因。
+
+### 0.3.15
+
+- 打包下载改为“一次只预取一个包”：图片列表累计到当前包数量后暂停继续翻页，等当前 ZIP 保存完成后再获取后续页面。
+- 打包目录改为 `Downloads/WeiboAlbum/用户名/用户名_001.zip`，逐张下载仍按相册目录保存。
+- 打包抓图使用独立限流，最多 3 路并发，并对单张图片 fetch 做一次重试，降低新浪图床 403/HTML/连接失败造成的大量失败。
+- 抓到的图片先暂存 IndexedDB，builder 只保留 key、大小和 CRC，避免 500 张图片同时堆在后台内存中。
+- 每个 ZIP 若体积过大仍会拆成多个分片，但逻辑包仍按设置的 500 张推进。
 
 ### 0.3.14
 
 - 修复打包抓图任务持续推进但 ZIP 保存任务排队太靠后，导致“只见打包不见下载、已保存长期为 0”的问题。
-- `zipSave` 改为优先任务，一个包抓满或因内存保护提前关闭后会先生成并交给 Chrome 下载。
+- `zipSave` 改为优先任务，一个包抓满后会先生成并交给 Chrome 下载。
 - 增加打包内存背压：有关闭但未保存的包时，不继续启动新包抓图，避免多个大包图片同时堆在后台内存里。
 - 打包主进度增加“已抓取”数量，区分“已经抓到后台”和“已经生成 ZIP 保存”。
 

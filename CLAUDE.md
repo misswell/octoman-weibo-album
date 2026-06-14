@@ -12,6 +12,7 @@
   - 如果返回 `text/html` 或 HTTP 403，应记录 `[download:fetch:error]`，不要把 HTML 保存成图片文件。
 - 后台 fetch 成功后不要再把 `Blob` 转成 data URL。大图片或 ZIP 的超长 base64 URL 会让 Chrome 主进程复制大量字符串，严重时直接崩溃。
 - 图片和 ZIP 都应走 `download_blob_via_offscreen()`：后台把 Blob 写入 IndexedDB，offscreen 页面读取后创建短 `blob:` URL，再调用 `chrome.downloads.download({ url: blobUrl, filename })`。
+- offscreen 页面只负责从 IndexedDB 读取 Blob 并创建短 `blob:` URL；真正保存文件必须由 background 调用 `chrome.downloads.download({ url: blobUrl, filename })`。不要让 offscreen 直接调用 `chrome.downloads`，offscreen 能力受限时会导致 ZIP 全部保存失败。
 
 ### 文件命名和扩展冲突
 
@@ -32,16 +33,20 @@
 - `package_size` 是用户语义上的“每个 ZIP 包最多多少张图片”，不是体积拆分阈值。默认 500 时，一个逻辑包应尽量包含 500 张；只有超过保护性 ZIP Blob 上限时才允许拆成 `用户名_001_01.zip` 这类分片，不能再出现普通图片被 8MB 阈值拆成每包 1-2 张的回归。
 - 打包文件名必须来自当前账号昵称，例如 `胖达MOER_001.zip`。如果页面误识别出“下载”“微博”“微相册”等通用词，必须丢弃并回退到 UID，不能把 ZIP 命名为“下载.zip”。
 - 打包模式不能等所有相册分页都请求完成后才开始抓图片。图片列表页返回后，应立即把图片加入 `zipItem` 队列并开始后台 fetch；分页请求、图片抓取、ZIP 生成要能流水线推进。
-- `zipSave` 必须比后续 `zipItem` 优先执行。一个包抓满或因内存保护提前关闭后，要先生成并交给 Chrome 下载，不能排在几千个图片抓取任务后面导致“只见打包不见下载”。
-- 打包必须有内存背压：包分配应尽量在图片真正开始抓取时发生；有关闭但未落盘的包时，不继续启动新包图片抓取。不要一次把多个 500 张包的二进制图片都堆在 service worker 内存里。
+- `zipSave` 必须比后续 `zipItem` 优先执行。一个包抓满后，要先生成并交给 Chrome 下载，不能排在几千个图片抓取任务后面导致“只见打包不见下载”。
+- 打包必须有内存背压：包分配应尽量在图片真正开始抓取时发生；抓到的图片先暂存 IndexedDB，builder 只保留 key、大小和 CRC；有关闭但未落盘的包时，不继续启动新包图片抓取。不要一次把多个 500 张包的二进制图片都堆在 service worker 内存里。
+- 打包分页也必须有背压：列表接口累计拿到当前包数量后，先停止继续翻页；等当前包 ZIP 保存完成并释放 builder 后，再继续请求后续页面。不要让 UI 出现“已抓取 1048 张，但只保存 216 张、正在处理第 9 包”的失控状态。
+- 打包抓图不能直接使用用户设置的 10 并发；应使用较低的独立并发（当前 `MAX_PACKAGE_FETCH_CONCURRENT = 3`）并带轻量重试，避免新浪图床大量 403/HTML/连接失败。
+- 打包目录必须是 `Downloads/WeiboAlbum/用户名/`，ZIP 文件名是 `用户名_001.zip`。不要再使用 `用户名_相册名` 作为打包目录；逐张下载可以继续使用相册目录。
 - 打包进度不能显示“第 0 包”或 “95 / 0”。每个 `zipItem` 必须先绑定一个真实 package builder，再更新 `package_current_index` / `package_current_total`。
 - 打包过程中不能只在 ZIP 创建完成后更新进度。每处理完一张图片都要更新 `package_processed` 和 `package_current_done` 并推送 popup，否则大包如 500 张会长时间显示 0。
 - popup 主进度应显示实际已保存图片数和失败数；“正在抓取/生成 ZIP”的后台处理量应放到状态行或包内进度里，避免和实际保存进度混淆。
 - 下载进度说明要尽量写成具体后台步骤，例如“正在识别当前微博页面和当前用户”“正在请求相册列表第 2 页”“正在获取相册图片列表第 5 页”“正在把第 5 页的 30 张图片加入打包队列”，不要只写“后台处理中”。
 - 包内单张图片 fetch 失败时，应记录 `[download:zip:item:error]` 并计入失败数；其他图片仍然写入 ZIP。
+- 包内存在失败项时，必须把 `download_failures.txt` 写入当前 ZIP，包含文件名、URL、错误信息和时间，方便用户不用打开扩展后台控制台也能定位失败原因。
 - 如果整个 ZIP 下载创建失败，这一包图片都应计入失败。
 - 每包数量通过 `package_size` 配置保存，当前限制为 1 到 500，默认值是 500。
-- ZIP 文件名应使用用户昵称加编号，例如 `胖达MOER_001.zip`，不要使用固定的 `package_001.zip`；目录仍然是 `WeiboAlbum/用户昵称_相册名/`。
+- ZIP 文件名应使用用户昵称加编号，例如 `胖达MOER_001.zip`，不要使用固定的 `package_001.zip`；打包目录是 `Downloads/WeiboAlbum/用户昵称/`。
 - ZIP 不要使用 `queue_data_url_filename()` / `append_data_url_token()`，否则会和 `chrome.downloads.download({ filename })` 形成双重命名，报“无法将下载的文件命名为空字符串，因为另一扩展程序已命名”。
 - 大 ZIP 不能通过 data URL 下载，曾导致 Chrome `EXC_BREAKPOINT (SIGTRAP)` 崩溃。生成 ZIP Blob 前必须按 `MAX_ZIP_BLOB_BYTES` 自动拆成多个 ZIP 分包，并同步增加 `package_total_extra`，保证包进度和实际下载数量一致。
 - 队列里只剩 `finish` 且 `downCurrent > 0` 时，不要立刻重新调度 `drainQueue()`；等待活动下载回调后再执行 finish，避免后台空转刷屏。
@@ -72,6 +77,8 @@
 - `[download:filename:fallback]`：说明原始文件名为空，已启用兜底命名。这个日志不是错误，但如果大量出现，需要检查相册接口字段是否变化。
 - `[download:zip:start]`：说明 ZIP 已生成并开始交给 Chrome 下载；`files` 是包内成功写入数量，`failed` 是包内拉取失败数量。
 - `[download:zip:item:error]`：说明包内某张图片拉取失败，不代表整个包失败。
+- `[download:blob:offscreen:error] Offscreen document is not ready` 后接 `fallback is too large`：说明图片和 ZIP 已生成，但保存 ZIP 的 offscreen 桥没准备好。大 ZIP 不能回退 data URL，必须等待并重试 offscreen 下载。
+- `[download:zip:download:error]`：说明 ZIP 保存失败，不代表包内图片抓取失败。不要把这一包的图片数全部计入 `download_fail`；应保留 `zipSave` 任务重试，连续失败后暂停等待用户继续。
 - Chrome 崩溃报告出现主进程 `EXC_BREAKPOINT (SIGTRAP)`，且下载时正在处理大批图片/ZIP：优先检查是否重新引入了 `data:` URL 下载或过大的 ZIP Blob。
 
 ### 版本记录相关

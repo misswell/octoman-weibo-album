@@ -69,7 +69,11 @@ function revoke_download_url(url, key) {
 }
 
 chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
-    if (!message || (message.type !== 'octo_offscreen_ping' && message.type !== 'octo_prepare_blob_url' && message.type !== 'octo_release_blob_url')) {
+    if (!message || (
+        message.type !== 'octo_offscreen_ping' &&
+        message.type !== 'octo_prepare_blob_url' &&
+        message.type !== 'octo_release_blob_url'
+    )) {
         return;
     }
     if (message.type === 'octo_offscreen_ping') {
